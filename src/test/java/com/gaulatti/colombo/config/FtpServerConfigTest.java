@@ -9,6 +9,7 @@ import com.gaulatti.colombo.ftp.ColomboFtplet;
 import com.gaulatti.colombo.ftp.ColomboUserManager;
 import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.repository.TenantRepository;
+import com.gaulatti.colombo.service.UploadService;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ftpserver.FtpServer;
 import org.junit.jupiter.api.Test;
@@ -24,7 +25,8 @@ class FtpServerConfigTest {
 
         ConcurrentHashMap<String, SessionData> sessions = config.sessions();
         ColomboUserManager userManager = config.colomboUserManager(sessions, "master");
-        ColomboFtplet ftplet = config.colomboFtplet(sessions, userManager);
+        UploadService uploadService = new UploadService(sessions, restTemplate, userManager);
+        ColomboFtplet ftplet = config.colomboFtplet(sessions, uploadService);
 
         assertNotNull(sessions);
         assertTrue(sessions.isEmpty());
@@ -40,7 +42,8 @@ class FtpServerConfigTest {
 
         ConcurrentHashMap<String, SessionData> sessions = config.sessions();
         ColomboUserManager userManager = config.colomboUserManager(sessions, "master");
-        ColomboFtplet ftplet = config.colomboFtplet(sessions, userManager);
+        UploadService uploadService = new UploadService(sessions, restTemplate, userManager);
+        ColomboFtplet ftplet = config.colomboFtplet(sessions, uploadService);
 
         FtpServer started = config.ftpServer(userManager, ftplet, 0, "60000-60002");
         assertNotNull(started);

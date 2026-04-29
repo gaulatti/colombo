@@ -389,6 +389,35 @@ public class ColomboUserManager implements UserManager {
     }
 
     /**
+     * Validates the given credentials against the CMS and returns the resulting
+     * {@link SessionData} on success.
+     *
+     * <p>Unlike the FTP {@link #authenticate} path, this method does <strong>not</strong>
+     * perform the master-password bypass — it always forwards the supplied password to the
+     * CMS validation endpoint.
+     *
+     * @param tenant   the tenant whose CMS endpoint should be called
+     * @param username the username (used for logging)
+     * @param password the credential to validate
+     * @return the {@link SessionData} returned by the CMS on success
+     * @throws org.apache.ftpserver.ftplet.AuthenticationFailedException if the CMS rejects
+     *         the credentials or the request fails
+     */
+    public SessionData validateForUpload(Tenant tenant, String username, String password)
+            throws org.apache.ftpserver.ftplet.AuthenticationFailedException {
+        ValidationResult result = validateAgainstCms(tenant, username, password, "upload");
+        if (result.status == ValidationStatus.DENIED) {
+            throw new org.apache.ftpserver.ftplet.AuthenticationFailedException(
+                    "CMS rejected credentials for username: " + username);
+        }
+        if (result.status != ValidationStatus.SUCCESS) {
+            throw new org.apache.ftpserver.ftplet.AuthenticationFailedException(
+                    "CMS validation request failed for username: " + username);
+        }
+        return result.sessionData;
+    }
+
+    /**
      * Calls the tenant's CMS validation endpoint with the given password and
      * parses the response into a {@link ValidationResult}.
      *

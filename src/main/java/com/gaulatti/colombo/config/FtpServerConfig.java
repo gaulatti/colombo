@@ -4,6 +4,7 @@ import com.gaulatti.colombo.ftp.ColomboFtplet;
 import com.gaulatti.colombo.ftp.ColomboUserManager;
 import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.repository.TenantRepository;
+import com.gaulatti.colombo.service.UploadService;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -96,16 +97,16 @@ public class FtpServerConfig implements DisposableBean {
      * Creates the {@link ColomboFtplet} bean that intercepts FTP lifecycle events
      * and coordinates file-upload processing.
      *
-     * @param sessions           the shared session map
-     * @param colomboUserManager the user manager for session refresh and eviction
+     * @param sessions      the shared session map
+     * @param uploadService the upload service for S3 and CMS photo-callback operations
      * @return a configured {@link ColomboFtplet}
      */
     @Bean
     public ColomboFtplet colomboFtplet(
             ConcurrentHashMap<String, SessionData> sessions,
-            ColomboUserManager colomboUserManager
+            UploadService uploadService
     ) {
-        return new ColomboFtplet(sessions, restTemplate, colomboUserManager);
+        return new ColomboFtplet(sessions, uploadService);
     }
 
     /**
