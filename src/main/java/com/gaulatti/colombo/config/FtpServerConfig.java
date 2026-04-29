@@ -4,6 +4,7 @@ import com.gaulatti.colombo.ftp.ColomboFtplet;
 import com.gaulatti.colombo.ftp.ColomboUserManager;
 import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.repository.TenantRepository;
+import com.gaulatti.colombo.service.UploadService;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -96,16 +97,16 @@ public class FtpServerConfig implements DisposableBean {
      * Creates the {@link ColomboFtplet} bean that intercepts FTP lifecycle events
      * and coordinates file-upload processing.
      *
-     * @param sessions           the shared session map
-     * @param colomboUserManager the user manager for session refresh and eviction
+     * @param sessions      the shared session map
+     * @param uploadService the upload service for S3 and CMS photo-callback operations
      * @return a configured {@link ColomboFtplet}
      */
     @Bean
     public ColomboFtplet colomboFtplet(
             ConcurrentHashMap<String, SessionData> sessions,
-            ColomboUserManager colomboUserManager
+            UploadService uploadService
     ) {
-        return new ColomboFtplet(sessions, restTemplate, colomboUserManager);
+        return new ColomboFtplet(sessions, uploadService);
     }
 
     /**
@@ -119,8 +120,9 @@ public class FtpServerConfig implements DisposableBean {
      *
      * @param colomboUserManager the user manager bean
      * @param colomboFtplet      the FTP lifecycle interceptor bean
-     * @param ftpPort            the port the server will listen on (default: {@code 21})
+     * @param ftpPort            the port the server will listen on (default: {@code 2121})
      * @param passivePorts       the passive port range expression (e.g. {@code 60000-60010})
+     * @param passiveExternalAddress optional public IPv4 address to advertise in PASV replies
      * @return the started {@link FtpServer} instance
      * @throws FtpException if the server fails to start
      */
@@ -130,7 +132,8 @@ public class FtpServerConfig implements DisposableBean {
             ColomboUserManager colomboUserManager,
             ColomboFtplet colomboFtplet,
             @Value("${colombo.ftp.port:2121}") int ftpPort,
-            @Value("${colombo.ftp.passive-ports:60000-60100}") String passivePorts
+            @Value("${colombo.ftp.passive-ports:60000-60100}") String passivePorts,
+            @Value("${colombo.ftp.passive-external-address:}") String passiveExternalAddress
     ) throws FtpException {
         FtpServerFactory factory = new FtpServerFactory();
         factory.setUserManager(colomboUserManager);
@@ -145,6 +148,10 @@ public class FtpServerConfig implements DisposableBean {
 
         DataConnectionConfigurationFactory dataConnectionConfigurationFactory = new DataConnectionConfigurationFactory();
         dataConnectionConfigurationFactory.setPassivePorts(passivePorts);
+        String normalizedPassiveExternalAddress = passiveExternalAddress == null ? "" : passiveExternalAddress.trim();
+        if (!normalizedPassiveExternalAddress.isEmpty()) {
+            dataConnectionConfigurationFactory.setPassiveExternalAddress(normalizedPassiveExternalAddress);
+        }
 
         ListenerFactory listenerFactory = new ListenerFactory();
         listenerFactory.setPort(ftpPort);
@@ -159,8 +166,8 @@ public class FtpServerConfig implements DisposableBean {
         FtpServer server = factory.createServer();
         server.start();
         this.ftpServer = server;
-        log.info("[FTP STARTUP] ftpHomeRoot='{}' ftpPort='{}' passivePorts='{}'",
-                System.getProperty("java.io.tmpdir"), ftpPort, passivePorts);
+        log.info("[FTP STARTUP] ftpHomeRoot='{}' ftpPort='{}' passivePorts='{}' passiveExternalAddress='{}'",
+                System.getProperty("java.io.tmpdir"), ftpPort, passivePorts, normalizedPassiveExternalAddress);
 
         return server;
     }

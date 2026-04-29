@@ -352,6 +352,44 @@ class ColomboUserManagerTest {
     }
 
     @Test
+    void validateForUploadReturnsSessionOnSuccessfulValidation() throws Exception {
+        when(restTemplate.exchange(eq(tenant.getValidationEndpoint()), any(), any(), eq(Map.class)))
+                .thenReturn(new ResponseEntity<>(validValidationBody(), HttpStatus.OK));
+        ColomboUserManager manager = new ColomboUserManager(tenantRepository, restTemplate, sessions, "master");
+
+        SessionData sessionData = manager.validateForUpload(tenant, "acme-user", "pw");
+
+        assertEquals("assignment-1", sessionData.getAssignmentId());
+        assertEquals("pw", sessionData.getValidationKey());
+    }
+
+    @Test
+    void validateForUploadRejectsDeniedCredentials() {
+        when(restTemplate.exchange(eq(tenant.getValidationEndpoint()), any(), any(), eq(Map.class)))
+                .thenThrow(HttpClientErrorException.create(
+                        HttpStatus.UNAUTHORIZED,
+                        "Unauthorized",
+                        HttpHeaders.EMPTY,
+                        new byte[0],
+                        StandardCharsets.UTF_8
+                ));
+        ColomboUserManager manager = new ColomboUserManager(tenantRepository, restTemplate, sessions, "master");
+
+        assertThrows(AuthenticationFailedException.class,
+                () -> manager.validateForUpload(tenant, "acme-user", "bad"));
+    }
+
+    @Test
+    void validateForUploadRejectsValidationErrors() {
+        when(restTemplate.exchange(eq(tenant.getValidationEndpoint()), any(), any(), eq(Map.class)))
+                .thenThrow(new RuntimeException("network"));
+        ColomboUserManager manager = new ColomboUserManager(tenantRepository, restTemplate, sessions, "master");
+
+        assertThrows(AuthenticationFailedException.class,
+                () -> manager.validateForUpload(tenant, "acme-user", "pw"));
+    }
+
+    @Test
     void authenticateHandlesNullFieldsInResponse() {
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         Map<String, Object> invalid = new HashMap<>();

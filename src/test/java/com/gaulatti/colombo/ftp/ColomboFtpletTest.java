@@ -4,27 +4,21 @@ import static com.gaulatti.colombo.TestFixtures.tenant;
 import static com.gaulatti.colombo.TestFixtures.validCredentials;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.gaulatti.colombo.model.Tenant;
+import com.gaulatti.colombo.service.UploadService;
 import java.io.File;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ftpserver.ftplet.FileSystemView;
@@ -38,32 +32,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.MockedStatic;
-import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.HttpServerErrorException;
-import org.springframework.web.client.RestTemplate;
-import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.S3ClientBuilder;
-import software.amazon.awssdk.services.s3.model.PutObjectRequest;
-import software.amazon.awssdk.services.s3.model.PutObjectResponse;
-import software.amazon.awssdk.services.s3.model.S3Exception;
 
 @ExtendWith(MockitoExtension.class)
 class ColomboFtpletTest {
 
     @Mock
-    private RestTemplate restTemplate;
-
-    @Mock
-    private ColomboUserManager userManager;
+    private UploadService uploadService;
 
     @Mock
     private FtpSession session;
@@ -81,7 +56,7 @@ class ColomboFtpletTest {
     @BeforeEach
     void setUp() {
         sessions = new ConcurrentHashMap<>();
-        ftplet = new ColomboFtplet(sessions, restTemplate, userManager);
+        ftplet = new ColomboFtplet(sessions, uploadService);
         tenant = tenant();
     }
 
@@ -182,142 +157,20 @@ class ColomboFtpletTest {
     void onUploadEndCompletesHappyPathAndMarksUploadProcessed() throws Exception {
         String username = "acme-user";
         mockLoggedInUser(username);
-        SessionData sessionData = new SessionData(tenant, "assignment-1", validCredentials(), "key");
-        sessions.put(username, sessionData);
+        sessions.put(username, new SessionData(tenant, "assignment-1", validCredentials(), "key"));
 
         File file = Files.createTempFile("colombo", ".jpg").toFile();
         Files.writeString(file.toPath(), "x");
 
         when(request.getArgument()).thenReturn(file.getName());
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenReturn(new ResponseEntity<>(HttpStatus.OK));
-
         mockPhysicalFile(file);
 
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
+        when(uploadService.processFtpUpload(eq(username), eq(file.getName()), eq(file))).thenReturn(true);
 
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            FtpletResult result = ftplet.onUploadEnd(session, request);
-            assertEquals(FtpletResult.DEFAULT, result);
-        }
+        FtpletResult result = ftplet.onUploadEnd(session, request);
+        assertEquals(FtpletResult.DEFAULT, result);
 
         verify(session).setAttribute(eq("colombo.upload.processed:" + file.getName()), eq(Boolean.TRUE));
-    }
-
-    @Test
-    void uploadToS3WithRefreshHandlesSessionValidationAndS3Errors() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-
-        Object noSession = method.invoke(ftplet, "missing", "file.jpg", file);
-        assertFalse((boolean) invokeUploadResultMethod(noSession, "success"));
-
-        sessions.put("bad", new SessionData(null, "assignment", validCredentials(), "key"));
-        Object invalidSession = method.invoke(ftplet, "bad", "file.jpg", file);
-        assertFalse((boolean) invokeUploadResultMethod(invalidSession, "success"));
-
-        SessionData validSession = new SessionData(tenant, "assignment", validCredentials(), "key");
-        sessions.put("acme-user", validSession);
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object success = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertTrue((boolean) invokeUploadResultMethod(success, "success"));
-            assertNotNull(invokeUploadResultMethod(success, "s3Url"));
-        }
-
-        S3Exception expired = s3("ExpiredToken", 400);
-        doThrow(expired).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        when(userManager.refreshSessionFromValidation("acme-user"))
-                .thenReturn(ColomboUserManager.RefreshResult.DENIED);
-
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object failed = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertFalse((boolean) invokeUploadResultMethod(failed, "success"));
-        }
-
-        verify(userManager).evictSession(eq("acme-user"), any());
-    }
-
-    @Test
-    void uploadToS3WithRefreshCoversRefreshRetryBranches() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        SessionData validSession = new SessionData(tenant, "assignment", validCredentials(), "key");
-        sessions.put("acme-user", validSession);
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        S3Exception expired = s3("ExpiredToken", 400);
-        S3Exception denied = s3("AccessDenied", 403);
-
-        doThrow(expired).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "", validCredentials(), "key"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object failed = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertFalse((boolean) invokeUploadResultMethod(failed, "success"));
-        }
-
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-        Mockito.reset(s3Client);
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
-                .thenThrow(expired)
-                .thenReturn(PutObjectResponse.builder().build())
-                .thenThrow(expired);
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment2", validCredentials(), "key2"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object retriedSuccess = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertNotNull(retriedSuccess);
-        }
-
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-        Mockito.reset(s3Client);
-        doThrow(expired).doThrow(denied).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment3", validCredentials(), "key3"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
-
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-        Mockito.reset(s3Client);
-        doThrow(s3("OtherError", 500)).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
     }
 
     @Test
@@ -329,69 +182,37 @@ class ColomboFtpletTest {
         when(request.getArgument()).thenReturn(file.getName());
         mockPhysicalFile(file);
 
-        sessions.put(username, new SessionData(tenant, "", validCredentials(), "key"));
+        sessions.put(username, new SessionData(tenant, "assignment", validCredentials(), "key"));
+        when(uploadService.processFtpUpload(any(), any(), any())).thenReturn(false);
         assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
 
-        sessions.put(username, new SessionData(tenant, "assignment", validCredentials(), "key"));
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-        doThrow(new RuntimeException("boom"))
-                .when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
-        }
+        when(uploadService.processFtpUpload(any(), any(), any())).thenThrow(new RuntimeException("boom"));
+        assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
     }
 
     @Test
-    void postPhotoCallbackCoversStatusAndExceptionBranches() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod(
-                "postPhotoCallback",
-                Tenant.class,
+    void processUploadHandlesNullRequestAndNullSession() throws Exception {
+        Method processUpload = ColomboFtplet.class.getDeclaredMethod(
+                "processUpload",
+                FtpSession.class,
+                FtpRequest.class,
                 String.class,
-                String.class,
-                String.class
+                boolean.class
         );
-        method.setAccessible(true);
+        processUpload.setAccessible(true);
 
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenReturn(new ResponseEntity<>(HttpStatus.OK));
-        method.invoke(ftplet, tenant, "assignment", "s3://bucket/key", "acme-user");
+        FtpletResult fromNullSession = (FtpletResult) processUpload.invoke(ftplet, null, null, "source", false);
+        assertEquals(FtpletResult.DEFAULT, fromNullSession);
 
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenReturn(new ResponseEntity<>(HttpStatus.UNAUTHORIZED));
-        assertThrows(InvocationTargetException.class,
-                () -> method.invoke(ftplet, tenant, "assignment", "s3://bucket/key", "acme-user"));
+        when(session.getUser()).thenReturn(null);
+        FtpletResult disconnect = (FtpletResult) processUpload.invoke(ftplet, session, null, "source", true);
+        assertEquals(FtpletResult.DISCONNECT, disconnect);
 
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenReturn(new ResponseEntity<>(HttpStatus.BAD_GATEWAY));
-        assertThrows(InvocationTargetException.class,
-                () -> method.invoke(ftplet, tenant, "assignment", "s3://bucket/key", "acme-user"));
-
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenThrow(HttpClientErrorException.create(
-                        HttpStatus.UNAUTHORIZED,
-                        "Unauthorized",
-                        HttpHeaders.EMPTY,
-                        new byte[0],
-                        StandardCharsets.UTF_8
-                ));
-        assertThrows(InvocationTargetException.class,
-                () -> method.invoke(ftplet, tenant, "assignment", "s3://bucket/key", "acme-user"));
-
-        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
-                .thenThrow(HttpServerErrorException.create(
-                        HttpStatus.BAD_GATEWAY,
-                        "Bad",
-                        HttpHeaders.EMPTY,
-                        new byte[0],
-                        StandardCharsets.UTF_8
-                ));
-        assertThrows(InvocationTargetException.class,
-                () -> method.invoke(ftplet, tenant, "assignment", "s3://bucket/key", "acme-user"));
+        User blankUser = mock(User.class);
+        when(blankUser.getName()).thenReturn("   ");
+        when(session.getUser()).thenReturn(blankUser);
+        FtpletResult blankUsername = (FtpletResult) processUpload.invoke(ftplet, session, request, "source", true);
+        assertEquals(FtpletResult.DISCONNECT, blankUsername);
     }
 
     @Test
@@ -439,73 +260,14 @@ class ColomboFtpletTest {
         invoke(ftplet, "markUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{session, "mk"});
         verify(session).setAttribute("mk", Boolean.TRUE);
         invoke(ftplet, "markUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{null, "mk"});
-
-        assertEquals("k/file.jpg", invoke(ftplet, "buildObjectKey", new Class[]{String.class, String.class}, new Object[]{"k", "file.jpg"}));
-        assertEquals("k/file.jpg", invoke(ftplet, "buildObjectKey", new Class[]{String.class, String.class}, new Object[]{"k/", "file.jpg"}));
-
-        assertTrue((boolean) invoke(ftplet, "isExpiredCredentialError", new Class[]{S3Exception.class}, new Object[]{s3("ExpiredToken", 400)}));
-        assertTrue((boolean) invoke(ftplet, "isExpiredCredentialError", new Class[]{S3Exception.class}, new Object[]{s3("RequestExpired", 400)}));
-        assertTrue((boolean) invoke(ftplet, "isExpiredCredentialError", new Class[]{S3Exception.class}, new Object[]{s3("InvalidToken", 400)}));
-        assertFalse((boolean) invoke(ftplet, "isExpiredCredentialError", new Class[]{S3Exception.class}, new Object[]{s3("Other", 400)}));
-        S3Exception noDetails = mock(S3Exception.class);
-        when(noDetails.statusCode()).thenReturn(400);
-        when(noDetails.awsErrorDetails()).thenReturn(null);
-        assertFalse((boolean) invoke(ftplet, "isExpiredCredentialError", new Class[]{S3Exception.class}, new Object[]{noDetails}));
-
-        assertTrue((boolean) invoke(ftplet, "isDeniedUploadError", new Class[]{S3Exception.class}, new Object[]{s3("Other", 403)}));
-        assertTrue((boolean) invoke(ftplet, "isDeniedUploadError", new Class[]{S3Exception.class}, new Object[]{s3("AccessDenied", 400)}));
-        assertFalse((boolean) invoke(ftplet, "isDeniedUploadError", new Class[]{S3Exception.class}, new Object[]{s3("Other", 400)}));
-        assertFalse((boolean) invoke(ftplet, "isDeniedUploadError", new Class[]{S3Exception.class}, new Object[]{noDetails}));
     }
 
     @Test
-    void processUploadHandlesNullRequestAndNullSession() throws Exception {
-        Method processUpload = ColomboFtplet.class.getDeclaredMethod(
-                "processUpload",
-                FtpSession.class,
-                FtpRequest.class,
-                String.class,
-                boolean.class
-        );
-        processUpload.setAccessible(true);
-
-        FtpletResult fromNullSession = (FtpletResult) processUpload.invoke(ftplet, null, null, "source", false);
-        assertEquals(FtpletResult.DEFAULT, fromNullSession);
-
-        when(session.getUser()).thenReturn(null);
-        FtpletResult disconnect = (FtpletResult) processUpload.invoke(ftplet, session, null, "source", true);
-        assertEquals(FtpletResult.DISCONNECT, disconnect);
-
-        User blankUser = mock(User.class);
-        when(blankUser.getName()).thenReturn("   ");
-        when(session.getUser()).thenReturn(blankUser);
-        FtpletResult blankUsername = (FtpletResult) processUpload.invoke(ftplet, session, request, "source", true);
-        assertEquals(FtpletResult.DISCONNECT, blankUsername);
-    }
-
-    @Test
-    void uploadToS3WithRefreshFailsWhenCredentialsAreInvalid() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        sessions.put("acme-user", new SessionData(tenant, "assignment", null, "key"));
-
-        Object failed = method.invoke(ftplet, "acme-user", "file.jpg", file);
-        assertFalse((boolean) invokeUploadResultMethod(failed, "success"));
-    }
-
-    @Test
-    void helperMethodsCoverNewFilenameRedactionBranches() throws Exception {
-        assertEquals("unknown",
-                invoke(ftplet, "extractFilenameFromS3Url", new Class[]{String.class}, new Object[]{null}));
-        assertEquals("unknown",
-                invoke(ftplet, "extractFilenameFromS3Url", new Class[]{String.class}, new Object[]{"   "}));
-        assertEquals("unknown",
-                invoke(ftplet, "extractFilenameFromS3Url", new Class[]{String.class}, new Object[]{"noslash"}));
-        assertEquals("unknown",
-                invoke(ftplet, "extractFilenameFromS3Url", new Class[]{String.class}, new Object[]{"s3://bucket/path/"}));
-        assertEquals("file.jpg",
-                invoke(ftplet, "extractFilenameFromS3Url", new Class[]{String.class}, new Object[]{"s3://bucket/path/file.jpg"}));
+    void helperMethodsCoverResolvePhysicalFileEdgeBranches() throws Exception {
+        FileSystemView view = mock(FileSystemView.class);
+        when(session.getFileSystemView()).thenReturn(view);
+        assertNull(invoke(ftplet, "resolvePhysicalFile", new Class[]{FtpSession.class, String.class}, new Object[]{session, "   "}));
+        assertNull(invoke(ftplet, "resolvePhysicalFile", new Class[]{FtpSession.class, String.class}, new Object[]{session, null}));
     }
 
     @Test
@@ -523,195 +285,6 @@ class ColomboFtpletTest {
         when(request.getArgument()).thenReturn(directory.getName());
         mockPhysicalFile(directory);
         assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
-    }
-
-    @Test
-    void uploadToS3WithRefreshCoversNullRefreshedSessionAndRetryExpiredBranch() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        S3Exception expired = s3("ExpiredToken", 400);
-
-        // Branch: refresh says refreshed, but session map has null afterwards.
-        doThrow(expired).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.remove("acme-user");
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object failed = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertFalse((boolean) invokeUploadResultMethod(failed, "success"));
-        }
-
-    }
-
-    @Test
-    void uploadToS3WithRefreshEvictsOnImmediateAccessDenied() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        doThrow(s3("AccessDenied", 403)).when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
-
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
-
-        verify(userManager).evictSession(eq("acme-user"), eq("S3 upload denied"));
-    }
-
-    @Test
-    void uploadToS3WithRefreshEvictsWhenRetryStillExpired() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        S3Exception expired = s3("ExpiredToken", 400);
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
-                .thenThrow(expired)
-                .thenThrow(expired);
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment-refreshed", validCredentials(), "key"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
-
-        verify(userManager).evictSession(eq("acme-user"), eq("S3 denied after credential refresh"));
-    }
-
-    @Test
-    void uploadToS3WithRefreshCoversRetrySuccessAndRetryExpiredPaths() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        S3Exception expired = s3("ExpiredToken", 400);
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        // Retry success path (covers UploadResult.success(...) return branch in refresh block).
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-        AtomicInteger calls = new AtomicInteger(0);
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class))).thenAnswer(inv -> {
-            if (calls.getAndIncrement() == 0) {
-                throw expired;
-            }
-            return PutObjectResponse.builder().build();
-        });
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment-refreshed", validCredentials(), "key"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            Object success = method.invoke(ftplet, "acme-user", "file.jpg", file);
-            assertTrue((boolean) invokeUploadResultMethod(success, "success"));
-        }
-
-        // Retry still expired path (covers isExpiredCredentialError branch in retry-exception OR).
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-        AtomicInteger calls2 = new AtomicInteger(0);
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class))).thenAnswer(inv -> {
-            calls2.getAndIncrement();
-            throw expired;
-        });
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment-refreshed", validCredentials(), "key"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
-    }
-
-    @Test
-    void helperMethodsCoverResolvePhysicalFileAndSessionValidationEdgeBranches() throws Exception {
-        // resolvePhysicalFile: ensure argument.isBlank() is evaluated with a non-null fileSystemView.
-        FileSystemView view = mock(FileSystemView.class);
-        when(session.getFileSystemView()).thenReturn(view);
-        assertNull(invoke(ftplet, "resolvePhysicalFile", new Class[]{FtpSession.class, String.class}, new Object[]{session, "   "}));
-        assertNull(invoke(ftplet, "resolvePhysicalFile", new Class[]{FtpSession.class, String.class}, new Object[]{session, null}));
-
-        Method validSessionMethod = ColomboFtplet.class.getDeclaredMethod("isValidSessionForUpload", String.class, SessionData.class);
-        validSessionMethod.setAccessible(true);
-
-        SessionData blankAssignment = new SessionData(tenant, "   ", validCredentials(), "key");
-        assertFalse((boolean) validSessionMethod.invoke(ftplet, "acme-user", blankAssignment));
-        SessionData nullAssignment = new SessionData(tenant, null, validCredentials(), "key");
-        assertFalse((boolean) validSessionMethod.invoke(ftplet, "acme-user", nullAssignment));
-
-        SessionUploadCredentials invalidCredentials = new SessionUploadCredentials(
-                "access", "secret", "token", "us-east-1", "bucket", "prefix", "   "
-        );
-        SessionData invalidUpload = new SessionData(tenant, "assignment", invalidCredentials, "key");
-        assertFalse((boolean) validSessionMethod.invoke(ftplet, "acme-user", invalidUpload));
-    }
-
-    @Test
-    void uploadToS3WithRefreshDoesNotEvictOnRetryNonDeniedNonExpiredError() throws Exception {
-        Method method = ColomboFtplet.class.getDeclaredMethod("uploadToS3WithRefresh", String.class, String.class, File.class);
-        method.setAccessible(true);
-        File file = Files.createTempFile("colombo", ".jpg").toFile();
-        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
-
-        S3Client s3Client = mock(S3Client.class);
-        S3ClientBuilder builder = mock(S3ClientBuilder.class);
-        when(builder.region(any())).thenReturn(builder);
-        when(builder.credentialsProvider(any())).thenReturn(builder);
-        when(builder.build()).thenReturn(s3Client);
-
-        S3Exception expired = s3("ExpiredToken", 400);
-        S3Exception other = s3("OtherError", 500);
-        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
-                .thenThrow(expired)
-                .thenThrow(other);
-        when(userManager.refreshSessionFromValidation("acme-user")).thenAnswer(invocation -> {
-            sessions.put("acme-user", new SessionData(tenant, "assignment-refreshed", validCredentials(), "key"));
-            return ColomboUserManager.RefreshResult.REFRESHED;
-        });
-
-        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
-            s3Static.when(S3Client::builder).thenReturn(builder);
-            assertThrows(InvocationTargetException.class,
-                    () -> method.invoke(ftplet, "acme-user", "file.jpg", file));
-        }
-
-        verify(userManager, never()).evictSession("acme-user", "S3 denied after credential refresh");
     }
 
     private void mockLoggedInUser(String username) {
@@ -734,18 +307,5 @@ class ColomboFtpletTest {
         Method method = ColomboFtplet.class.getDeclaredMethod(methodName, types);
         method.setAccessible(true);
         return method.invoke(target, args);
-    }
-
-    private Object invokeUploadResultMethod(Object uploadResult, String methodName) throws Exception {
-        Method method = uploadResult.getClass().getDeclaredMethod(methodName);
-        method.setAccessible(true);
-        return method.invoke(uploadResult);
-    }
-
-    private S3Exception s3(String code, int statusCode) {
-        S3Exception exception = mock(S3Exception.class);
-        Mockito.lenient().when(exception.statusCode()).thenReturn(statusCode);
-        Mockito.lenient().when(exception.awsErrorDetails()).thenReturn(AwsErrorDetails.builder().errorCode(code).build());
-        return exception;
     }
 }

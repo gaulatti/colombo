@@ -1,13 +1,11 @@
 package com.gaulatti.colombo.ftp;
 
 import com.gaulatti.colombo.model.Tenant;
+import com.gaulatti.colombo.service.UploadService;
 import java.io.File;
 import java.nio.file.Paths;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.ftpserver.ftplet.Authentication;
 import org.apache.ftpserver.ftplet.DefaultFtplet;
 import org.apache.ftpserver.ftplet.FtpException;
 import org.apache.ftpserver.ftplet.FtpReply;
@@ -16,20 +14,6 @@ import org.apache.ftpserver.ftplet.FtpSession;
 import org.apache.ftpserver.ftplet.Ftplet;
 import org.apache.ftpserver.ftplet.FtpletContext;
 import org.apache.ftpserver.ftplet.FtpletResult;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.client.HttpStatusCodeException;
-import org.springframework.web.client.RestTemplate;
-import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.PutObjectRequest;
-import software.amazon.awssdk.services.s3.model.S3Exception;
 
 /**
  * Custom Apache FTP server ftplet that intercepts FTP lifecycle events for Colombo.
@@ -42,9 +26,6 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 @Slf4j
 public class ColomboFtplet extends DefaultFtplet implements Ftplet {
 
-    /** HTTP header name used to authenticate outbound requests to the CMS. */
-    private static final String API_KEY_HEADER = "X-Colombo-API-Key";
-
     /**
      * Session-attribute key prefix used to mark uploads that have already been
      * processed, preventing double-handling of the same {@code STOR} transfer.
@@ -54,27 +35,21 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
     /** Shared concurrent map of active session data keyed by FTP username. */
     private final ConcurrentHashMap<String, SessionData> sessions;
 
-    /** HTTP client for outbound calls to the CMS. */
-    private final RestTemplate restTemplate;
-
-    /** User manager used for session refresh and eviction operations. */
-    private final ColomboUserManager colomboUserManager;
+    /** Service delegate for S3 upload and CMS photo-callback operations. */
+    private final UploadService uploadService;
 
     /**
      * Creates a new {@code ColomboFtplet}.
      *
-     * @param sessions           shared session map
-     * @param restTemplate       HTTP client for CMS calls
-     * @param colomboUserManager user manager for session refresh and eviction
+     * @param sessions      shared session map
+     * @param uploadService service delegate for S3 upload and CMS photo callback
      */
     public ColomboFtplet(
             ConcurrentHashMap<String, SessionData> sessions,
-            RestTemplate restTemplate,
-            ColomboUserManager colomboUserManager
+            UploadService uploadService
     ) {
         this.sessions = sessions;
-        this.restTemplate = restTemplate;
-        this.colomboUserManager = colomboUserManager;
+        this.uploadService = uploadService;
     }
 
     /**
@@ -230,14 +205,12 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
         }
 
         try {
-            UploadResult uploadResult = uploadToS3WithRefresh(username, filename, localFile);
-            if (!uploadResult.success()) {
+            boolean success = uploadService.processFtpUpload(username, filename, localFile);
+            if (!success) {
                 return failureResult(disconnectOnFailure);
             }
-            SessionData activeSession = uploadResult.sessionData();
-            postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), uploadResult.s3Url(), username);
             markUploadProcessed(session, markerKey);
-                log.info("Upload processed for ftpUsername='{}', file='{}'",
+            log.info("Upload processed for ftpUsername='{}', file='{}'",
                     username, filename);
             return FtpletResult.DEFAULT;
         } catch (Exception ex) {
@@ -428,195 +401,6 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
     }
 
     /**
-     * Builds an authenticated {@link S3Client} from the given temporary credentials.
-     *
-     * @param uploadCredentials the session upload credentials containing STS tokens
-     * @return a configured {@link S3Client}
-     */
-    private S3Client resolveS3Client(SessionUploadCredentials uploadCredentials) {
-        AwsSessionCredentials credentials = AwsSessionCredentials.create(
-                uploadCredentials.getAccessKeyId(),
-                uploadCredentials.getSecretAccessKey(),
-                uploadCredentials.getSessionToken()
-        );
-        return S3Client.builder()
-                .region(Region.of(uploadCredentials.getRegion()))
-                .credentialsProvider(StaticCredentialsProvider.create(credentials))
-                .build();
-    }
-
-    /**
-     * Constructs the full S3 object key by joining the key prefix and filename.
-     *
-     * @param keyPrefix the destination prefix (may or may not end with {@code /})
-     * @param filename  the bare filename of the uploaded file
-     * @return the full S3 object key
-     */
-    private String buildObjectKey(String keyPrefix, String filename) {
-        if (keyPrefix.endsWith("/")) {
-            return keyPrefix + filename;
-        }
-        return keyPrefix + "/" + filename;
-    }
-
-    /**
-     * Uploads a file to S3, transparently refreshing expired credentials once if needed.
-     *
-     * <p>On an {@code ExpiredToken} / {@code InvalidToken} S3 error, the session is
-     * re-validated against the CMS and the upload is retried with fresh credentials.
-     * If refresh is denied or the retry also fails, the session is evicted.
-     *
-     * @param username  the FTP username that owns the session
-     * @param filename  the bare filename to use as the S3 object name suffix
-     * @param localFile the local file to upload
-     * @return an {@link UploadResult} describing success or failure
-     */
-    private UploadResult uploadToS3WithRefresh(String username, String filename, File localFile) {
-        SessionData sessionData = sessions.get(username);
-        if (sessionData == null) {
-            log.warn("No in-memory session found for ftpUsername='{}'", username);
-            return UploadResult.failure();
-        }
-        if (!isValidSessionForUpload(username, sessionData)) {
-            return UploadResult.failure();
-        }
-
-        try {
-            String s3Url = uploadToS3(sessionData, username, filename, localFile);
-            return UploadResult.success(sessionData, s3Url);
-        } catch (S3Exception s3Exception) {
-            if (isExpiredCredentialError(s3Exception)) {
-                log.warn("[S3 UPLOAD] expired credentials ftpUsername='{}' — refreshing via validate endpoint", username);
-                ColomboUserManager.RefreshResult refreshResult = colomboUserManager.refreshSessionFromValidation(username);
-                if (refreshResult != ColomboUserManager.RefreshResult.REFRESHED) {
-                    colomboUserManager.evictSession(username, "validate refresh denied/failed after expired S3 credentials");
-                    return UploadResult.failure();
-                }
-                SessionData refreshedSession = sessions.get(username);
-                if (refreshedSession == null || !isValidSessionForUpload(username, refreshedSession)) {
-                    colomboUserManager.evictSession(username, "refreshed session invalid after validate refresh");
-                    return UploadResult.failure();
-                }
-                try {
-                    return UploadResult.success(
-                            refreshedSession,
-                            uploadToS3(refreshedSession, username, filename, localFile)
-                    );
-                } catch (S3Exception retryException) {
-                    if (isDeniedUploadError(retryException) || isExpiredCredentialError(retryException)) {
-                        colomboUserManager.evictSession(username, "S3 denied after credential refresh");
-                    }
-                    throw retryException;
-                }
-            }
-            if (isDeniedUploadError(s3Exception)) {
-                colomboUserManager.evictSession(username, "S3 upload denied");
-            }
-            throw s3Exception;
-        }
-    }
-
-    /**
-     * Performs the actual S3 {@code PutObject} call for the given session and file.
-     *
-     * @param sessionData the session providing upload credentials and assignment context
-     * @param username    the FTP username (used for logging)
-     * @param filename    the bare filename to append to the key prefix
-     * @param localFile   the file to upload
-     * @return the resulting S3 URL in {@code s3://bucket/key} format
-     */
-    private String uploadToS3(SessionData sessionData, String username, String filename, File localFile) {
-        String assignmentId = sessionData.getAssignmentId();
-        SessionUploadCredentials uploadCredentials = sessionData.getUploadCredentials();
-        String s3Key = buildObjectKey(uploadCredentials.getKeyPrefix(), filename);
-        String bucket = uploadCredentials.getBucket();
-
-        log.info("[S3 UPLOAD] start ftpUsername='{}' assignmentId='{}' localFile='{}' bucket='{}' key='{}'",
-                username, assignmentId, localFile.getAbsolutePath(), bucket, s3Key);
-        S3Client client = resolveS3Client(uploadCredentials);
-        PutObjectRequest putObjectRequest = PutObjectRequest.builder()
-                .bucket(bucket)
-                .key(s3Key)
-                .build();
-        client.putObject(putObjectRequest, RequestBody.fromFile(localFile.toPath()));
-
-        String s3Url = "s3://" + bucket + "/" + s3Key;
-        log.info("[S3 UPLOAD] success ftpUsername='{}' assignmentId='{}' file='{}'", username, assignmentId, filename);
-        return s3Url;
-    }
-
-    /**
-     * Returns {@code true} if the session contains all data required to perform an S3 upload.
-     *
-     * @param username    the FTP username (used for logging)
-     * @param sessionData the session to validate
-     * @return {@code true} when the session is ready for upload
-     */
-    private boolean isValidSessionForUpload(String username, SessionData sessionData) {
-        Tenant tenant = sessionData.getTenant();
-        if (tenant == null) {
-            log.warn("Session exists for ftpUsername='{}' but tenant data is missing", username);
-            return false;
-        }
-
-        String assignmentId = sessionData.getAssignmentId();
-        if (assignmentId == null || assignmentId.isBlank()) {
-            log.warn("Missing assignmentId in session for ftpUsername='{}'", username);
-            return false;
-        }
-
-        SessionUploadCredentials uploadCredentials = sessionData.getUploadCredentials();
-        if (uploadCredentials == null || !uploadCredentials.isValid()) {
-            log.warn("Missing or invalid upload credentials in session for ftpUsername='{}'", username);
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Sends a photo-uploaded callback to the CMS, notifying it of the S3 URL.
-     *
-     * @param tenant       the tenant whose CMS endpoint should be called
-     * @param assignmentId the assignment associated with the upload
-     * @param s3Url        the S3 URL of the uploaded file
-     * @param username     the FTP username (used for session eviction on denial)
-     */
-    private void postPhotoCallback(Tenant tenant, String assignmentId, String s3Url, String username) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set(API_KEY_HEADER, tenant.getApiKey());
-
-        Map<String, String> body = new LinkedHashMap<>();
-        body.put("assignment_id", assignmentId);
-        body.put("s3_url", s3Url);
-
-        log.info("[PHOTO CALLBACK] sending assignmentId='{}' file='{}'",
-            assignmentId, extractFilenameFromS3Url(s3Url));
-
-        try {
-            ResponseEntity<Void> response = restTemplate.exchange(
-                    tenant.getPhotoEndpoint(),
-                    HttpMethod.POST,
-                    new HttpEntity<>(body, headers),
-                    Void.class
-            );
-
-            if (!HttpStatus.OK.equals(response.getStatusCode())) {
-                if (response.getStatusCode().is4xxClientError()) {
-                    colomboUserManager.evictSession(username, "photo callback denied");
-                }
-                throw new IllegalStateException("Photo callback failed with status: " + response.getStatusCode());
-            }
-
-            log.info("[PHOTO CALLBACK] accepted assignmentId='{}' status='{}'", assignmentId, response.getStatusCode());
-        } catch (HttpStatusCodeException ex) {
-            if (ex.getStatusCode().is4xxClientError()) {
-                colomboUserManager.evictSession(username, "photo callback denied");
-            }
-            throw ex;
-        }
-    }
-
-    /**
      * Returns {@code true} if the given FTP request is a {@code STOR} command.
      *
      * @param request the FTP request to inspect; may be {@code null}
@@ -667,129 +451,6 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
     private void markUploadProcessed(FtpSession session, String markerKey) {
         if (session != null) {
             session.setAttribute(markerKey, Boolean.TRUE);
-        }
-    }
-
-    /**
-     * Returns {@code true} if the S3 exception indicates that the session credentials
-     * have expired or are otherwise invalid.
-     *
-     * @param exception the S3 exception to inspect
-     * @return {@code true} for {@code ExpiredToken}, {@code RequestExpired}, or {@code InvalidToken} errors
-     */
-    private boolean isExpiredCredentialError(S3Exception exception) {
-        String errorCode = exception.awsErrorDetails() == null ? null : exception.awsErrorDetails().errorCode();
-        if (errorCode == null) {
-            return false;
-        }
-        return "ExpiredToken".equalsIgnoreCase(errorCode)
-                || "RequestExpired".equalsIgnoreCase(errorCode)
-                || "InvalidToken".equalsIgnoreCase(errorCode);
-    }
-
-    /**
-     * Returns {@code true} if the S3 exception indicates that the upload was denied
-     * due to insufficient permissions.
-     *
-     * @param exception the S3 exception to inspect
-     * @return {@code true} for HTTP 403 or {@code AccessDenied} errors
-     */
-    private boolean isDeniedUploadError(S3Exception exception) {
-        String errorCode = exception.awsErrorDetails() == null ? null : exception.awsErrorDetails().errorCode();
-        return exception.statusCode() == 403 || "AccessDenied".equalsIgnoreCase(errorCode);
-    }
-
-    /**
-     * Extracts the filename segment from an {@code s3://bucket/key} URL.
-     *
-     * @param s3Url the S3 URL; may be {@code null}
-     * @return the trailing filename, or {@code "unknown"} if unavailable
-     */
-    private String extractFilenameFromS3Url(String s3Url) {
-        if (s3Url == null || s3Url.isBlank()) {
-            return "unknown";
-        }
-        int lastSlash = s3Url.lastIndexOf('/');
-        if (lastSlash < 0 || lastSlash == s3Url.length() - 1) {
-            return "unknown";
-        }
-        return s3Url.substring(lastSlash + 1);
-    }
-
-    /**
-     * Value object that carries the result of an S3 upload attempt.
-     *
-     * <p>On success, holds the active {@link SessionData} and the resulting S3 URL.
-     * On failure, all fields are {@code null}/{@code false}.
-     */
-    private static final class UploadResult {
-        /** Whether the upload succeeded. */
-        private final boolean success;
-
-        /** The session data active at the time of upload; {@code null} on failure. */
-        private final SessionData sessionData;
-
-        /** The resulting S3 URL; {@code null} on failure. */
-        private final String s3Url;
-
-        /**
-         * Creates an {@code UploadResult}.
-         *
-         * @param success     whether the upload succeeded
-         * @param sessionData the session that performed the upload
-         * @param s3Url       the S3 URL of the uploaded object
-         */
-        private UploadResult(boolean success, SessionData sessionData, String s3Url) {
-            this.success = success;
-            this.sessionData = sessionData;
-            this.s3Url = s3Url;
-        }
-
-        /**
-         * Creates a successful result.
-         *
-         * @param sessionData the active session
-         * @param s3Url       the URL of the uploaded object
-         * @return a successful {@code UploadResult}
-         */
-        private static UploadResult success(SessionData sessionData, String s3Url) {
-            return new UploadResult(true, sessionData, s3Url);
-        }
-
-        /**
-         * Creates a failed result with no session or URL.
-         *
-         * @return a failed {@code UploadResult}
-         */
-        private static UploadResult failure() {
-            return new UploadResult(false, null, null);
-        }
-
-        /**
-         * Returns {@code true} if the upload was successful.
-         *
-         * @return {@code true} on success
-         */
-        private boolean success() {
-            return success;
-        }
-
-        /**
-         * Returns the session data associated with the upload.
-         *
-         * @return the active {@link SessionData}, or {@code null} on failure
-         */
-        private SessionData sessionData() {
-            return sessionData;
-        }
-
-        /**
-         * Returns the S3 URL of the uploaded object.
-         *
-         * @return the S3 URL, or {@code null} on failure
-         */
-        private String s3Url() {
-            return s3Url;
         }
     }
 }
