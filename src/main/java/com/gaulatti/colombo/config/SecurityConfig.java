@@ -33,6 +33,8 @@ public class SecurityConfig {
      * Configures the security filter chain.
      *
      * <ul>
+    *   <li>{@code GET /} — permitted without authentication; useful for a basic
+    *       uptime probe and quick manual verification.</li>
      *   <li>{@code POST /upload} — permitted without Spring Security authentication;
      *       the controller performs its own CMS credential validation.</li>
      *   <li>Actuator endpoints ({@code /actuator/**}) — permitted for infrastructure
@@ -54,6 +56,7 @@ public class SecurityConfig {
             // be vulnerable to CSRF.
             .csrf(AbstractHttpConfigurer::disable)
             .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/").permitAll()
                 .requestMatchers("/upload").permitAll()
                 .requestMatchers("/actuator/**").permitAll()
                 .anyRequest().authenticated()
