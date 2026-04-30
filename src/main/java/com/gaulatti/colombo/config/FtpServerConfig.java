@@ -14,6 +14,7 @@ import org.apache.ftpserver.FtpServer;
 import org.apache.ftpserver.FtpServerFactory;
 import org.apache.ftpserver.ftplet.FtpException;
 import org.apache.ftpserver.listener.ListenerFactory;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
@@ -135,16 +136,7 @@ public class FtpServerConfig implements DisposableBean {
             @Value("${colombo.ftp.passive-ports:60000-60100}") String passivePorts,
             @Value("${colombo.ftp.passive-external-address:}") String passiveExternalAddress
     ) throws FtpException {
-        FtpServerFactory factory = new FtpServerFactory();
-        factory.setUserManager(colomboUserManager);
-        factory.setFtplets(new HashMap<>(Map.of("colombo", colomboFtplet)));
-
-        ConnectionConfigFactory connectionConfigFactory = new ConnectionConfigFactory();
-        connectionConfigFactory.setAnonymousLoginEnabled(false);
-        connectionConfigFactory.setMaxLogins(Integer.MAX_VALUE);
-        connectionConfigFactory.setMaxAnonymousLogins(Integer.MAX_VALUE);
-        connectionConfigFactory.setMaxLoginFailures(0);
-        factory.setConnectionConfig(connectionConfigFactory.createConnectionConfig());
+        FtpServerFactory factory = getFtpServerFactory(colomboUserManager, colomboFtplet);
 
         DataConnectionConfigurationFactory dataConnectionConfigurationFactory = new DataConnectionConfigurationFactory();
         dataConnectionConfigurationFactory.setPassivePorts(passivePorts);
@@ -170,6 +162,31 @@ public class FtpServerConfig implements DisposableBean {
                 System.getProperty("java.io.tmpdir"), ftpPort, passivePorts, normalizedPassiveExternalAddress);
 
         return server;
+    }
+
+    /**
+     * Creates and configures an {@link FtpServerFactory} instance with the specified
+     * {@link ColomboUserManager} and {@link ColomboFtplet}.
+     *
+     * @param colomboUserManager the user manager responsible for authenticating FTP users
+     *                           and managing in-memory session state
+     * @param colomboFtplet      the FTP lifecycle interceptor responsible for processing
+     *                           FTP lifecycle events such as file uploads
+     * @return a configured {@link FtpServerFactory} instance with custom user manager,
+     *         Ftplet, and connection configuration
+     */
+    private static @NonNull FtpServerFactory getFtpServerFactory(ColomboUserManager colomboUserManager, ColomboFtplet colomboFtplet) {
+        FtpServerFactory factory = new FtpServerFactory();
+        factory.setUserManager(colomboUserManager);
+        factory.setFtplets(new HashMap<>(Map.of("colombo", colomboFtplet)));
+
+        ConnectionConfigFactory connectionConfigFactory = new ConnectionConfigFactory();
+        connectionConfigFactory.setAnonymousLoginEnabled(false);
+        connectionConfigFactory.setMaxLogins(Integer.MAX_VALUE);
+        connectionConfigFactory.setMaxAnonymousLogins(Integer.MAX_VALUE);
+        connectionConfigFactory.setMaxLoginFailures(0);
+        factory.setConnectionConfig(connectionConfigFactory.createConnectionConfig());
+        return factory;
     }
 
     /**
