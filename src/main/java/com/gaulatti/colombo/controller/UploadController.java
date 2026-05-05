@@ -5,7 +5,6 @@ import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.model.Tenant;
 import com.gaulatti.colombo.repository.TenantRepository;
 import com.gaulatti.colombo.service.UploadService;
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,10 +38,10 @@ import org.springframework.web.server.ResponseStatusException;
  * file=&lt;image binary&gt;
  * </pre>
  *
- * <h3>Response format (200 OK)</h3>
+ * <h3>Response format (202 Accepted)</h3>
  * <pre>
  * {
- *   "s3_url": "s3://bucket/prefix/filename.jpg",
+ *   "status": "accepted",
  *   "assignment_id": "..."
  * }
  * </pre>
@@ -79,8 +78,8 @@ public class UploadController {
 
     /**
      * Accepts a multipart file upload, authenticates the caller against the CMS,
-     * uploads the file to S3, fires the CMS photo callback, and returns the S3 URL
-     * and assignment ID.
+     * writes the file to local temporary storage, schedules S3 upload and CMS photo
+     * callback processing, and returns an acceptance receipt to the uploader.
      *
      * <p>The master-password bypass present in the FTP path is intentionally not
      * reachable through this endpoint; only real CMS credentials are accepted.
@@ -88,11 +87,11 @@ public class UploadController {
      * @param username the FTP username, supplied in the {@code X-Colombo-Username} header
      * @param password the CMS credential key, supplied in the {@code X-Colombo-Password} header
      * @param file     the file to upload, supplied as the {@code file} form field
-     * @return {@code 200 OK} with {@code {"s3_url": "...", "assignment_id": "..."}} on success
+     * @return {@code 202 Accepted} with {@code {"status": "accepted", "assignment_id": "..."}} on success
      * @throws ResponseStatusException {@code 400} if the username or file is missing;
      *                                 {@code 401} if credentials are rejected by the CMS;
      *                                 {@code 404} if no tenant is registered for the username;
-     *                                 {@code 500} on S3 or callback failure
+     *                                 {@code 500} if the upload cannot be received locally
      */
     @PostMapping("/upload")
     public ResponseEntity<Map<String, String>> upload(
@@ -139,27 +138,14 @@ public class UploadController {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to process uploaded file");
         }
 
-        File tempFile = tempPath.toFile();
-        try {
-            String s3Url = uploadService.uploadToS3(sessionData, username, filename, tempFile);
-            uploadService.postPhotoCallback(tenant, sessionData.getAssignmentId(), s3Url, username);
+        uploadService.processHttpUploadAsync(sessionData, username, filename, tempPath);
 
-            log.info("[UPLOAD] complete username='{}' assignmentId='{}' s3Url='{}'",
-                    username, sessionData.getAssignmentId(), s3Url);
+        log.info("[UPLOAD] accepted username='{}' assignmentId='{}' filename='{}'",
+                username, sessionData.getAssignmentId(), filename);
 
-            Map<String, String> response = new LinkedHashMap<>();
-            response.put("s3_url", s3Url);
-            response.put("assignment_id", sessionData.getAssignmentId());
-            return ResponseEntity.ok(response);
-        } catch (Exception ex) {
-            log.error("[UPLOAD] upload or callback failed username='{}' filename='{}'", username, filename, ex);
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Upload failed");
-        } finally {
-            try {
-                Files.deleteIfExists(tempPath);
-            } catch (IOException deleteEx) {
-                log.warn("[UPLOAD] failed to delete temp file path='{}'", tempPath, deleteEx);
-            }
-        }
+        Map<String, String> response = new LinkedHashMap<>();
+        response.put("status", "accepted");
+        response.put("assignment_id", sessionData.getAssignmentId());
+        return ResponseEntity.accepted().body(response);
     }
 }

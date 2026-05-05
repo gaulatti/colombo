@@ -25,7 +25,7 @@ class FtpServerConfigTest {
 
         ConcurrentHashMap<String, SessionData> sessions = config.sessions();
         ColomboUserManager userManager = config.colomboUserManager(sessions, "master");
-        UploadService uploadService = new UploadService(sessions, restTemplate, userManager);
+        UploadService uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run);
         ColomboFtplet ftplet = config.colomboFtplet(sessions, uploadService);
 
         assertNotNull(sessions);
@@ -42,7 +42,7 @@ class FtpServerConfigTest {
 
         ConcurrentHashMap<String, SessionData> sessions = config.sessions();
         ColomboUserManager userManager = config.colomboUserManager(sessions, "master");
-        UploadService uploadService = new UploadService(sessions, restTemplate, userManager);
+        UploadService uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run);
         ColomboFtplet ftplet = config.colomboFtplet(sessions, uploadService);
 
         FtpServer started = config.ftpServer(userManager, ftplet, 0, "60000-60002", null);
@@ -62,7 +62,7 @@ class FtpServerConfigTest {
 
         ConcurrentHashMap<String, SessionData> sessions = config.sessions();
         ColomboUserManager userManager = config.colomboUserManager(sessions, "master");
-        UploadService uploadService = new UploadService(sessions, restTemplate, userManager);
+        UploadService uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run);
         ColomboFtplet ftplet = config.colomboFtplet(sessions, uploadService);
 
         FtpServer started = config.ftpServer(userManager, ftplet, 0, "60000-60002", "127.0.0.1");

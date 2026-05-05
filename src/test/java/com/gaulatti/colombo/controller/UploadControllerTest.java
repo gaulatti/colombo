@@ -7,8 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
@@ -63,13 +64,11 @@ class UploadControllerTest {
     }
 
     @Test
-    void uploadReturns200WithS3UrlAndAssignmentIdOnHappyPath() throws Exception {
+    void uploadReturns202WithAssignmentIdAfterReceivingFile() throws Exception {
         SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         when(colomboUserManager.validateForUpload(eq(tenant), eq("acme-user"), eq("secret")))
                 .thenReturn(sessionData);
-        when(uploadService.uploadToS3(eq(sessionData), eq("acme-user"), any(), any()))
-                .thenReturn("s3://bucket/prefix/photo.jpg");
 
         MockMultipartFile file = new MockMultipartFile(
                 "file", "photo.jpg", MediaType.IMAGE_JPEG_VALUE, "imgdata".getBytes());
@@ -78,9 +77,13 @@ class UploadControllerTest {
                         .file(file)
                         .header("X-Colombo-Username", "acme-user")
                         .header("X-Colombo-Password", "secret"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.s3_url").value("s3://bucket/prefix/photo.jpg"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("accepted"))
                 .andExpect(jsonPath("$.assignment_id").value("assignment-123"));
+
+        ArgumentCaptor<Path> pathCaptor = ArgumentCaptor.forClass(Path.class);
+        verify(uploadService).processHttpUploadAsync(eq(sessionData), eq("acme-user"), eq("photo.jpg"), pathCaptor.capture());
+        Files.deleteIfExists(pathCaptor.getValue());
     }
 
     @Test
@@ -148,40 +151,24 @@ class UploadControllerTest {
     }
 
     @Test
-    void uploadReturns500WhenS3Fails() throws Exception {
+    void uploadReturns202WithoutWaitingForBackgroundProcessing() throws Exception {
         SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         when(colomboUserManager.validateForUpload(any(), any(), any())).thenReturn(sessionData);
-        when(uploadService.uploadToS3(any(), any(), any(), any()))
-                .thenThrow(new RuntimeException("S3 failure"));
 
         MockMultipartFile file = new MockMultipartFile(
                 "file", "photo.jpg", MediaType.IMAGE_JPEG_VALUE, "imgdata".getBytes());
+
+        ArgumentCaptor<Path> pathCaptor = ArgumentCaptor.forClass(Path.class);
 
         mockMvc.perform(multipart("/upload")
                         .file(file)
                         .header("X-Colombo-Username", "acme-user")
                         .header("X-Colombo-Password", "secret"))
-                .andExpect(status().isInternalServerError());
-    }
+                .andExpect(status().isAccepted());
 
-    @Test
-    void uploadReturns500WhenPhotoCallbackFails() throws Exception {
-        SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
-        when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
-        when(colomboUserManager.validateForUpload(any(), any(), any())).thenReturn(sessionData);
-        when(uploadService.uploadToS3(any(), any(), any(), any())).thenReturn("s3://bucket/key");
-        doThrow(new RuntimeException("callback failure"))
-                .when(uploadService).postPhotoCallback(any(), any(), any(), any());
-
-        MockMultipartFile file = new MockMultipartFile(
-                "file", "photo.jpg", MediaType.IMAGE_JPEG_VALUE, "imgdata".getBytes());
-
-        mockMvc.perform(multipart("/upload")
-                        .file(file)
-                        .header("X-Colombo-Username", "acme-user")
-                        .header("X-Colombo-Password", "secret"))
-                .andExpect(status().isInternalServerError());
+        verify(uploadService).processHttpUploadAsync(any(), any(), any(), pathCaptor.capture());
+        Files.deleteIfExists(pathCaptor.getValue());
     }
 
     @Test
@@ -189,8 +176,6 @@ class UploadControllerTest {
         SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         when(colomboUserManager.validateForUpload(any(), any(), any())).thenReturn(sessionData);
-        when(uploadService.uploadToS3(any(), any(), eq("upload"), any()))
-                .thenReturn("s3://bucket/prefix/upload");
 
         MockMultipartFile file = new MockMultipartFile(
                 "file", (String) null, MediaType.IMAGE_JPEG_VALUE, "imgdata".getBytes());
@@ -199,8 +184,12 @@ class UploadControllerTest {
                         .file(file)
                         .header("X-Colombo-Username", "acme-user")
                         .header("X-Colombo-Password", "secret"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.s3_url").value("s3://bucket/prefix/upload"));
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("accepted"));
+
+        ArgumentCaptor<Path> pathCaptor = ArgumentCaptor.forClass(Path.class);
+        verify(uploadService).processHttpUploadAsync(eq(sessionData), eq("acme-user"), eq("upload"), pathCaptor.capture());
+        Files.deleteIfExists(pathCaptor.getValue());
     }
 
     @Test
@@ -208,11 +197,13 @@ class UploadControllerTest {
         SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         when(colomboUserManager.validateForUpload(any(), any(), any())).thenReturn(sessionData);
-        when(uploadService.uploadToS3(any(), any(), eq("upload"), any()))
-                .thenReturn("s3://bucket/prefix/upload");
+        ArgumentCaptor<Path> pathCaptor = ArgumentCaptor.forClass(Path.class);
 
-        assertEquals(HttpStatus.OK,
+        assertEquals(HttpStatus.ACCEPTED,
                 controller.upload("acme-user", "secret", new TestMultipartFile(null)).getStatusCode());
+
+        verify(uploadService).processHttpUploadAsync(eq(sessionData), eq("acme-user"), eq("upload"), pathCaptor.capture());
+        Files.deleteIfExists(pathCaptor.getValue());
     }
 
     @Test
@@ -228,13 +219,11 @@ class UploadControllerTest {
     }
 
     @Test
-    void uploadStillSucceedsWhenTempCleanupFails() throws Exception {
+    void uploadSchedulesBackgroundProcessingWhenTempCleanupWouldFailInRequestThread() throws Exception {
         SessionData sessionData = new SessionData(tenant, "assignment-123", validCredentials(), "key");
         when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
         when(colomboUserManager.validateForUpload(eq(tenant), eq("acme-user"), eq("secret")))
                 .thenReturn(sessionData);
-        when(uploadService.uploadToS3(eq(sessionData), eq("acme-user"), eq("photo.jpg"), any()))
-                .thenReturn("s3://bucket/prefix/photo.jpg");
 
         MockMultipartFile file = new MockMultipartFile(
                 "file", "photo.jpg", MediaType.IMAGE_JPEG_VALUE, "imgdata".getBytes());
@@ -242,7 +231,7 @@ class UploadControllerTest {
         try (MockedStatic<Files> files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
             files.when(() -> Files.deleteIfExists(any(Path.class))).thenThrow(new IOException("cleanup failed"));
 
-            assertEquals(HttpStatus.OK, controller.upload("acme-user", "secret", file).getStatusCode());
+            assertEquals(HttpStatus.ACCEPTED, controller.upload("acme-user", "secret", file).getStatusCode());
         }
     }
 

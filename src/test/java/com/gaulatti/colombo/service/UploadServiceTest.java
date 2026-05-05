@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -25,6 +26,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -65,7 +67,7 @@ class UploadServiceTest {
     @BeforeEach
     void setUp() {
         sessions = new ConcurrentHashMap<>();
-        uploadService = new UploadService(sessions, restTemplate, userManager);
+        uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run);
         tenant = tenant();
     }
 
@@ -343,6 +345,64 @@ class UploadServiceTest {
     void processFtpUploadReturnsFalseWhenS3UploadFails() throws Exception {
         File file = Files.createTempFile("colombo", ".jpg").toFile();
         assertFalse(uploadService.processFtpUpload("missing-user", "file.jpg", file));
+    }
+
+    // ─────────────────────────── HTTP background upload ─────────────────────────
+
+    @Test
+    void processHttpUploadAsyncSchedulesWorkOnExecutor() throws Exception {
+        AtomicInteger scheduled = new AtomicInteger();
+        uploadService = new UploadService(sessions, restTemplate, userManager, runnable -> {
+            scheduled.incrementAndGet();
+            runnable.run();
+        });
+        SessionData sessionData = new SessionData(tenant, "assignment", validCredentials(), "key");
+        Path path = Files.createTempFile("colombo", ".jpg");
+
+        S3Client s3Client = mock(S3Client.class);
+        S3ClientBuilder builder = mockS3Builder(s3Client);
+        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
+                .thenReturn(new ResponseEntity<>(HttpStatus.OK));
+
+        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
+            s3Static.when(S3Client::builder).thenReturn(builder);
+            uploadService.processHttpUploadAsync(sessionData, "acme-user", "file.jpg", path);
+        }
+
+        assertEquals(1, scheduled.get());
+        assertFalse(Files.exists(path));
+    }
+
+    @Test
+    void processHttpUploadDeletesTempFileAfterFailure() throws Exception {
+        SessionData sessionData = new SessionData(tenant, "assignment", validCredentials(), "key");
+        Path path = Files.createTempFile("colombo", ".jpg");
+
+        S3Client s3Client = mock(S3Client.class);
+        S3ClientBuilder builder = mockS3Builder(s3Client);
+        doThrow(new RuntimeException("S3 failure"))
+                .when(s3Client).putObject(any(PutObjectRequest.class), any(RequestBody.class));
+
+        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
+            s3Static.when(S3Client::builder).thenReturn(builder);
+            uploadService.processHttpUpload(sessionData, "acme-user", "file.jpg", path);
+        }
+
+        assertFalse(Files.exists(path));
+        verify(restTemplate, never()).exchange(any(String.class), any(), any(), eq(Void.class));
+    }
+
+    @Test
+    void processHttpUploadLogsTempCleanupFailure() throws Exception {
+        Path path = Files.createTempFile("colombo", ".jpg");
+
+        try (MockedStatic<Files> files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            files.when(() -> Files.deleteIfExists(path)).thenThrow(new java.io.IOException("cleanup failed"));
+
+            uploadService.processHttpUpload(null, "acme-user", "file.jpg", path);
+        }
+
+        Files.deleteIfExists(path);
     }
 
     // ─────────────────────────── postPhotoCallback ───────────────────────────────
