@@ -27,6 +27,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -345,6 +346,24 @@ class UploadServiceTest {
     void processFtpUploadReturnsFalseWhenS3UploadFails() throws Exception {
         File file = Files.createTempFile("colombo", ".jpg").toFile();
         assertFalse(uploadService.processFtpUpload("missing-user", "file.jpg", file));
+    }
+
+    @Test
+    void processFtpUploadAsyncRunsOnExecutorAndReturnsSuccess() throws Exception {
+        sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
+        File file = Files.createTempFile("colombo", ".jpg").toFile();
+        Files.writeString(file.toPath(), "x");
+
+        S3Client s3Client = mock(S3Client.class);
+        S3ClientBuilder builder = mockS3Builder(s3Client);
+        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
+                .thenReturn(new ResponseEntity<>(HttpStatus.OK));
+
+        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
+            s3Static.when(S3Client::builder).thenReturn(builder);
+            CompletableFuture<Boolean> result = uploadService.processFtpUploadAsync("acme-user", "file.jpg", file);
+            assertTrue(result.join());
+        }
     }
 
     // ─────────────────────────── HTTP background upload ─────────────────────────

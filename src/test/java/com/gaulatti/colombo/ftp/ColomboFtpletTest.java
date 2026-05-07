@@ -194,6 +194,10 @@ class ColomboFtpletTest {
         when(uploadService.processFtpUploadAsync(any(), any(), any()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("boom")));
         assertEquals(FtpletResult.DEFAULT, ftplet.onUploadEnd(session, request));
+
+        when(uploadService.processFtpUploadAsync(any(), any(), any()))
+                .thenThrow(new RuntimeException("sync-boom"));
+        assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
     }
 
     @Test
