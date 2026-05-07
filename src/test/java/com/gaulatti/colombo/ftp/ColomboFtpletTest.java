@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -19,6 +20,7 @@ import java.io.File;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
+import java.util.concurrent.CompletableFuture;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ftpserver.ftplet.FileSystemView;
@@ -58,6 +60,8 @@ class ColomboFtpletTest {
         sessions = new ConcurrentHashMap<>();
         ftplet = new ColomboFtplet(sessions, uploadService);
         tenant = tenant();
+        lenient().when(uploadService.processFtpUploadAsync(any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(true));
     }
 
     @Test
@@ -165,7 +169,8 @@ class ColomboFtpletTest {
         when(request.getArgument()).thenReturn(file.getName());
         mockPhysicalFile(file);
 
-        when(uploadService.processFtpUpload(eq(username), eq(file.getName()), eq(file))).thenReturn(true);
+        when(uploadService.processFtpUploadAsync(eq(username), eq(file.getName()), eq(file)))
+                .thenReturn(CompletableFuture.completedFuture(true));
 
         FtpletResult result = ftplet.onUploadEnd(session, request);
         assertEquals(FtpletResult.DEFAULT, result);
@@ -183,11 +188,12 @@ class ColomboFtpletTest {
         mockPhysicalFile(file);
 
         sessions.put(username, new SessionData(tenant, "assignment", validCredentials(), "key"));
-        when(uploadService.processFtpUpload(any(), any(), any())).thenReturn(false);
-        assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
+        when(uploadService.processFtpUploadAsync(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(false));
+        assertEquals(FtpletResult.DEFAULT, ftplet.onUploadEnd(session, request));
 
-        when(uploadService.processFtpUpload(any(), any(), any())).thenThrow(new RuntimeException("boom"));
-        assertEquals(FtpletResult.DISCONNECT, ftplet.onUploadEnd(session, request));
+        when(uploadService.processFtpUploadAsync(any(), any(), any()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("boom")));
+        assertEquals(FtpletResult.DEFAULT, ftplet.onUploadEnd(session, request));
     }
 
     @Test
@@ -260,6 +266,9 @@ class ColomboFtpletTest {
         invoke(ftplet, "markUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{session, "mk"});
         verify(session).setAttribute("mk", Boolean.TRUE);
         invoke(ftplet, "markUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{null, "mk"});
+        invoke(ftplet, "clearUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{session, "mk"});
+        verify(session).removeAttribute("mk");
+        invoke(ftplet, "clearUploadProcessed", new Class[]{FtpSession.class, String.class}, new Object[]{null, "mk"});
     }
 
     @Test

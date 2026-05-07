@@ -4,6 +4,7 @@ import com.gaulatti.colombo.model.Tenant;
 import com.gaulatti.colombo.service.UploadService;
 import java.io.File;
 import java.nio.file.Paths;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.ftpserver.ftplet.DefaultFtplet;
@@ -27,7 +28,7 @@ import org.apache.ftpserver.ftplet.FtpletResult;
 public class ColomboFtplet extends DefaultFtplet implements Ftplet {
 
     /**
-     * Session-attribute key prefix used to mark uploads that have already been
+     * Session-attribute key prefix used to mark uploads that are in-flight or already
      * processed, preventing double-handling of the same {@code STOR} transfer.
      */
     private static final String UPLOAD_PROCESSED_ATTR_PREFIX = "colombo.upload.processed:";
@@ -153,11 +154,11 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
     }
 
     /**
-     * Core upload handler shared by {@link #onUploadEnd} and {@link #afterCommand}.
+     * Core upload scheduler shared by {@link #onUploadEnd} and {@link #afterCommand}.
      *
-     * <p>Validates the session, resolves the uploaded file on disk, pushes it to S3,
-     * and fires the CMS photo callback. Deduplication is enforced via a session attribute
-     * so that the same transfer is not processed twice.
+     * <p>Validates the session and resolves the uploaded file on disk, then schedules
+     * S3 upload and CMS photo callback in the background. Deduplication is enforced via
+     * a session attribute so that the same transfer is not processed twice.
      *
      * @param session              the active FTP session
      * @param request              the STOR command request
@@ -166,6 +167,7 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
      * @return {@link FtpletResult#DEFAULT} on success, or disconnect/default on failure
      */
     private FtpletResult processUpload(FtpSession session, FtpRequest request, String source, boolean disconnectOnFailure) {
+        long enqueueStartedAtNanos = System.nanoTime();
         Object sessionId = session == null ? null : session.getSessionId();
         String username = extractUsername(session);
         String rawArgument = request == null ? null : request.getArgument();
@@ -204,16 +206,32 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
             return failureResult(disconnectOnFailure);
         }
 
+        markUploadProcessed(session, markerKey);
+
         try {
-            boolean success = uploadService.processFtpUpload(username, filename, localFile);
-            if (!success) {
-                return failureResult(disconnectOnFailure);
-            }
-            markUploadProcessed(session, markerKey);
-            log.info("Upload processed for ftpUsername='{}', file='{}'",
-                    username, filename);
+            CompletableFuture<Boolean> uploadFuture = uploadService.processFtpUploadAsync(username, filename, localFile);
+            log.info("[UPLOAD] queued source='{}' sessionId='{}' username='{}' file='{}' ftpReturnLatencyMs='{}'",
+                    source, sessionId, username, filename, elapsedMillis(enqueueStartedAtNanos));
+            uploadFuture.whenComplete((success, throwable) -> {
+                long processingDurationMs = elapsedMillis(enqueueStartedAtNanos);
+                if (throwable != null) {
+                    clearUploadProcessed(session, markerKey);
+                    log.error("Unrecoverable upload processing error for ftpUsername='{}', file='{}', processingDurationMs='{}'",
+                            username, filename, processingDurationMs, throwable);
+                    return;
+                }
+                if (!Boolean.TRUE.equals(success)) {
+                    clearUploadProcessed(session, markerKey);
+                    log.warn("Upload processing failed for ftpUsername='{}', file='{}', processingDurationMs='{}'",
+                            username, filename, processingDurationMs);
+                    return;
+                }
+                log.info("Upload processed for ftpUsername='{}', file='{}', processingDurationMs='{}'",
+                        username, filename, processingDurationMs);
+            });
             return FtpletResult.DEFAULT;
         } catch (Exception ex) {
+            clearUploadProcessed(session, markerKey);
             log.error("Unrecoverable upload processing error for ftpUsername='{}', file='{}'", username, filename, ex);
             return failureResult(disconnectOnFailure);
         }
@@ -452,5 +470,27 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
         if (session != null) {
             session.setAttribute(markerKey, Boolean.TRUE);
         }
+    }
+
+    /**
+     * Clears the upload marker, allowing retries when background processing fails.
+     *
+     * @param session   the FTP session holding attributes
+     * @param markerKey the attribute key to clear
+     */
+    private void clearUploadProcessed(FtpSession session, String markerKey) {
+        if (session != null) {
+            session.removeAttribute(markerKey);
+        }
+    }
+
+    /**
+     * Returns elapsed time in milliseconds from the given start tick.
+     *
+     * @param startedAtNanos start tick from {@link System#nanoTime()}
+     * @return elapsed time in milliseconds
+     */
+    private long elapsedMillis(long startedAtNanos) {
+        return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 }

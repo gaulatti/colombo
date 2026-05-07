@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import lombok.extern.slf4j.Slf4j;
@@ -102,6 +103,22 @@ public class UploadService {
         SessionData activeSession = result.sessionData();
         postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username);
         return true;
+    }
+
+    /**
+     * Schedules the FTP upload pipeline on the shared upload executor.
+     *
+     * <p>This keeps FTP command handling responsive while S3 upload and CMS callback
+     * continue in the background.
+     *
+     * @param username  the FTP username that owns the session
+     * @param filename  the bare filename to use as the S3 object name suffix
+     * @param localFile the local file to upload
+     * @return a future that completes with {@code true} on success, {@code false} on
+     *         recoverable failure, or exceptionally on unexpected errors
+     */
+    public CompletableFuture<Boolean> processFtpUploadAsync(String username, String filename, File localFile) {
+        return CompletableFuture.supplyAsync(() -> processFtpUpload(username, filename, localFile), uploadExecutor);
     }
 
     /**
