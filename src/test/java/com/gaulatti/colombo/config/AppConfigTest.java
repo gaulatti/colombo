@@ -23,11 +23,24 @@ class AppConfigTest {
     }
 
     @Test
-    void uploadExecutorBeanFactoryCreatesConfiguredExecutor() {
-        ThreadPoolTaskExecutor executor = appConfig.uploadExecutor();
+    void s3UploadExecutorBeanFactoryCreatesConfiguredExecutor() {
+        ThreadPoolTaskExecutor executor = appConfig.s3UploadExecutor();
 
         assertNotNull(executor);
-        assertTrue(executor.getThreadNamePrefix().startsWith("colombo-upload-"));
+        assertTrue(executor.getThreadNamePrefix().startsWith("colombo-s3-upload-"));
+        assertTrue(executor.getCorePoolSize() == executor.getMaxPoolSize());
+        assertTrue(executor.getThreadPoolExecutor().getQueue().remainingCapacity() > 1000);
+        executor.shutdown();
+    }
+
+    @Test
+    void cmsCallbackExecutorBeanFactoryCreatesConfiguredExecutor() {
+        ThreadPoolTaskExecutor executor = appConfig.cmsCallbackExecutor();
+
+        assertNotNull(executor);
+        assertTrue(executor.getThreadNamePrefix().startsWith("colombo-cms-callback-"));
+        assertTrue(executor.getCorePoolSize() == executor.getMaxPoolSize());
+        assertTrue(executor.getThreadPoolExecutor().getQueue().remainingCapacity() > 1000);
         executor.shutdown();
     }
 }

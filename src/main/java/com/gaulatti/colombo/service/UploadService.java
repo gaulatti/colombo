@@ -59,8 +59,11 @@ public class UploadService {
     /** User manager used for session refresh and eviction operations. */
     private final ColomboUserManager colomboUserManager;
 
-    /** Executor used to decouple HTTP upload processing from the request thread. */
-    private final Executor uploadExecutor;
+    /** Executor used for outbound S3 uploads after Colombo has accepted a file locally. */
+    private final Executor s3UploadExecutor;
+
+    /** Executor used for CMS photo callbacks after S3 upload succeeds. */
+    private final Executor cmsCallbackExecutor;
 
     /**
      * Creates a new {@code UploadService}.
@@ -68,18 +71,21 @@ public class UploadService {
      * @param sessions           shared session map
      * @param restTemplate       HTTP client for CMS calls
      * @param colomboUserManager user manager for session refresh and eviction
-     * @param uploadExecutor     executor for asynchronous HTTP upload processing
+     * @param s3UploadExecutor   executor for asynchronous S3 upload processing
+     * @param cmsCallbackExecutor executor for asynchronous CMS callback processing
      */
     public UploadService(
             ConcurrentHashMap<String, SessionData> sessions,
             RestTemplate restTemplate,
             ColomboUserManager colomboUserManager,
-            @Qualifier("uploadExecutor") Executor uploadExecutor
+            @Qualifier("s3UploadExecutor") Executor s3UploadExecutor,
+            @Qualifier("cmsCallbackExecutor") Executor cmsCallbackExecutor
     ) {
         this.sessions = sessions;
         this.restTemplate = restTemplate;
         this.colomboUserManager = colomboUserManager;
-        this.uploadExecutor = uploadExecutor;
+        this.s3UploadExecutor = s3UploadExecutor;
+        this.cmsCallbackExecutor = cmsCallbackExecutor;
     }
 
     /**
@@ -106,10 +112,11 @@ public class UploadService {
     }
 
     /**
-     * Schedules the FTP upload pipeline on the shared upload executor.
+     * Schedules the FTP upload pipeline on outbound queues.
      *
-     * <p>This keeps FTP command handling responsive while S3 upload and CMS callback
-     * continue in the background.
+     * <p>This keeps FTP command handling responsive after Colombo has accepted the
+     * file locally. The S3 upload is queued first; the CMS photo callback is queued
+     * only after S3 succeeds.
      *
      * @param username  the FTP username that owns the session
      * @param filename  the bare filename to use as the S3 object name suffix
@@ -118,7 +125,9 @@ public class UploadService {
      *         recoverable failure, or exceptionally on unexpected errors
      */
     public CompletableFuture<Boolean> processFtpUploadAsync(String username, String filename, File localFile) {
-        return CompletableFuture.supplyAsync(() -> processFtpUpload(username, filename, localFile), uploadExecutor);
+        return CompletableFuture
+                .supplyAsync(() -> uploadToS3WithRefresh(username, filename, localFile), s3UploadExecutor)
+                .thenCompose(result -> queuePhotoCallback(result, username));
     }
 
     /**
@@ -134,26 +143,69 @@ public class UploadService {
      * @param localPath   the temporary file containing the received upload
      */
     public void processHttpUploadAsync(SessionData sessionData, String username, String filename, Path localPath) {
-        uploadExecutor.execute(() -> processHttpUpload(sessionData, username, filename, localPath));
+        CompletableFuture<UploadResult> s3Upload = CompletableFuture.supplyAsync(
+                () -> processHttpUploadToS3(sessionData, username, filename, localPath),
+                s3UploadExecutor
+        );
+
+        s3Upload.whenComplete((result, throwable) -> deleteLocalPath(localPath));
+
+        s3Upload
+                .thenCompose(result -> queuePhotoCallback(result, username)
+                        .thenApply(success -> {
+                            log.info("[UPLOAD] background complete username='{}' assignmentId='{}' s3Url='{}'",
+                                    username, result.sessionData().getAssignmentId(), result.s3Url());
+                            return success;
+                        }))
+                .whenComplete((success, throwable) -> {
+                    if (throwable != null) {
+                        log.error("[UPLOAD] background upload or callback failed username='{}' filename='{}'",
+                                username, filename, throwable);
+                    }
+                });
     }
 
     void processHttpUpload(SessionData sessionData, String username, String filename, Path localPath) {
         try {
-            File localFile = localPath.toFile();
-            String s3Url = uploadToS3(sessionData, username, filename, localFile);
-            postPhotoCallback(sessionData.getTenant(), sessionData.getAssignmentId(), s3Url, username);
+            UploadResult result = processHttpUploadToS3(sessionData, username, filename, localPath);
+            postPhotoCallback(
+                    result.sessionData().getTenant(),
+                    result.sessionData().getAssignmentId(),
+                    result.s3Url(),
+                    username
+            );
 
             log.info("[UPLOAD] background complete username='{}' assignmentId='{}' s3Url='{}'",
-                    username, sessionData.getAssignmentId(), s3Url);
+                    username, sessionData.getAssignmentId(), result.s3Url());
         } catch (Exception ex) {
             log.error("[UPLOAD] background upload or callback failed username='{}' filename='{}'",
                     username, filename, ex);
         } finally {
-            try {
-                Files.deleteIfExists(localPath);
-            } catch (IOException deleteEx) {
-                log.warn("[UPLOAD] failed to delete temp file path='{}'", localPath, deleteEx);
-            }
+            deleteLocalPath(localPath);
+        }
+    }
+
+    private UploadResult processHttpUploadToS3(SessionData sessionData, String username, String filename, Path localPath) {
+        String s3Url = uploadToS3(sessionData, username, filename, localPath.toFile());
+        return UploadResult.success(sessionData, s3Url);
+    }
+
+    private CompletableFuture<Boolean> queuePhotoCallback(UploadResult result, String username) {
+        if (!result.success()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        SessionData activeSession = result.sessionData();
+        return CompletableFuture.supplyAsync(() -> {
+            postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username);
+            return true;
+        }, cmsCallbackExecutor);
+    }
+
+    private void deleteLocalPath(Path localPath) {
+        try {
+            Files.deleteIfExists(localPath);
+        } catch (IOException deleteEx) {
+            log.warn("[UPLOAD] failed to delete temp file path='{}'", localPath, deleteEx);
         }
     }
 

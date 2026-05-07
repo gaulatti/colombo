@@ -68,7 +68,7 @@ class UploadServiceTest {
     @BeforeEach
     void setUp() {
         sessions = new ConcurrentHashMap<>();
-        uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run);
+        uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run, Runnable::run);
         tenant = tenant();
     }
 
@@ -349,7 +349,31 @@ class UploadServiceTest {
     }
 
     @Test
+    void processFtpUploadAsyncDoesNotScheduleCallbackWhenS3UploadFails() throws Exception {
+        AtomicInteger callbacksScheduled = new AtomicInteger();
+        uploadService = new UploadService(sessions, restTemplate, userManager, Runnable::run, runnable -> {
+            callbacksScheduled.incrementAndGet();
+            runnable.run();
+        });
+        File file = Files.createTempFile("colombo", ".jpg").toFile();
+
+        CompletableFuture<Boolean> result = uploadService.processFtpUploadAsync("missing-user", "file.jpg", file);
+
+        assertFalse(result.join());
+        assertEquals(0, callbacksScheduled.get());
+    }
+
+    @Test
     void processFtpUploadAsyncRunsOnExecutorAndReturnsSuccess() throws Exception {
+        AtomicInteger s3Scheduled = new AtomicInteger();
+        AtomicInteger callbacksScheduled = new AtomicInteger();
+        uploadService = new UploadService(sessions, restTemplate, userManager, runnable -> {
+            s3Scheduled.incrementAndGet();
+            runnable.run();
+        }, runnable -> {
+            callbacksScheduled.incrementAndGet();
+            runnable.run();
+        });
         sessions.put("acme-user", new SessionData(tenant, "assignment", validCredentials(), "key"));
         File file = Files.createTempFile("colombo", ".jpg").toFile();
         Files.writeString(file.toPath(), "x");
@@ -364,6 +388,8 @@ class UploadServiceTest {
             CompletableFuture<Boolean> result = uploadService.processFtpUploadAsync("acme-user", "file.jpg", file);
             assertTrue(result.join());
         }
+        assertEquals(1, s3Scheduled.get());
+        assertEquals(1, callbacksScheduled.get());
     }
 
     // ─────────────────────────── HTTP background upload ─────────────────────────
@@ -371,8 +397,12 @@ class UploadServiceTest {
     @Test
     void processHttpUploadAsyncSchedulesWorkOnExecutor() throws Exception {
         AtomicInteger scheduled = new AtomicInteger();
+        AtomicInteger callbacksScheduled = new AtomicInteger();
         uploadService = new UploadService(sessions, restTemplate, userManager, runnable -> {
             scheduled.incrementAndGet();
+            runnable.run();
+        }, runnable -> {
+            callbacksScheduled.incrementAndGet();
             runnable.run();
         });
         SessionData sessionData = new SessionData(tenant, "assignment", validCredentials(), "key");
@@ -389,7 +419,47 @@ class UploadServiceTest {
         }
 
         assertEquals(1, scheduled.get());
+        assertEquals(1, callbacksScheduled.get());
         assertFalse(Files.exists(path));
+    }
+
+    @Test
+    void processHttpUploadAsyncLogsFailureWhenCallbackFails() throws Exception {
+        SessionData sessionData = new SessionData(tenant, "assignment", validCredentials(), "key");
+        Path path = Files.createTempFile("colombo", ".jpg");
+
+        S3Client s3Client = mock(S3Client.class);
+        S3ClientBuilder builder = mockS3Builder(s3Client);
+        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
+                .thenThrow(HttpServerErrorException.create(
+                        HttpStatus.BAD_GATEWAY, "Bad",
+                        HttpHeaders.EMPTY, new byte[0], StandardCharsets.UTF_8));
+
+        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
+            s3Static.when(S3Client::builder).thenReturn(builder);
+            uploadService.processHttpUploadAsync(sessionData, "acme-user", "file.jpg", path);
+        }
+
+        assertFalse(Files.exists(path));
+    }
+
+    @Test
+    void processHttpUploadUploadsPostsCallbackAndDeletesTempFile() throws Exception {
+        SessionData sessionData = new SessionData(tenant, "assignment", validCredentials(), "key");
+        Path path = Files.createTempFile("colombo", ".jpg");
+
+        S3Client s3Client = mock(S3Client.class);
+        S3ClientBuilder builder = mockS3Builder(s3Client);
+        when(restTemplate.exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class)))
+                .thenReturn(new ResponseEntity<>(HttpStatus.OK));
+
+        try (MockedStatic<S3Client> s3Static = mockStatic(S3Client.class)) {
+            s3Static.when(S3Client::builder).thenReturn(builder);
+            uploadService.processHttpUpload(sessionData, "acme-user", "file.jpg", path);
+        }
+
+        assertFalse(Files.exists(path));
+        verify(restTemplate).exchange(eq(tenant.getPhotoEndpoint()), eq(HttpMethod.POST), any(), eq(Void.class));
     }
 
     @Test

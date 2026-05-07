@@ -26,18 +26,34 @@ public class AppConfig {
     }
 
     /**
-     * Creates the executor used for HTTP uploads after the request body has been
-     * accepted and written to local temporary storage.
+     * Creates the executor used for outbound S3 uploads after Colombo has
+     * accepted the inbound FTP/HTTP upload.
      *
-     * @return a bounded executor for background upload processing
+     * @return an unbounded-queue executor for background S3 upload processing
      */
     @Bean
-    public ThreadPoolTaskExecutor uploadExecutor() {
+    public ThreadPoolTaskExecutor s3UploadExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setThreadNamePrefix("colombo-upload-");
-        executor.setCorePoolSize(2);
+        executor.setThreadNamePrefix("colombo-s3-upload-");
+        executor.setCorePoolSize(8);
         executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(100);
+        executor.setQueueCapacity(Integer.MAX_VALUE);
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * Creates the executor used for CMS photo callbacks after S3 upload succeeds.
+     *
+     * @return an unbounded-queue executor for CMS callback processing
+     */
+    @Bean
+    public ThreadPoolTaskExecutor cmsCallbackExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setThreadNamePrefix("colombo-cms-callback-");
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(Integer.MAX_VALUE);
         executor.initialize();
         return executor;
     }
