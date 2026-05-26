@@ -272,7 +272,7 @@ public class UploadService {
                     Void.class
             );
 
-            if (!HttpStatus.OK.equals(response.getStatusCode())) {
+            if (!response.getStatusCode().is2xxSuccessful()) {
                 if (response.getStatusCode().is4xxClientError()) {
                     colomboUserManager.evictSession(username, "photo callback denied");
                 }
