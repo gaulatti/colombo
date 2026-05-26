@@ -464,7 +464,7 @@ public class ColomboUserManager implements UserManager {
         log.info("[AUTH {}] CMS responded for username='{}' status='{}'",
                 flow.toUpperCase(), username, response.getStatusCode());
 
-        if (!HttpStatus.OK.equals(response.getStatusCode())) {
+        if (!response.getStatusCode().is2xxSuccessful()) {
             if (response.getStatusCode().is4xxClientError()) {
                 log.warn("[AUTH {}] validation rejected for username='{}' status='{}' body='{}'",
                         flow.toUpperCase(), username, response.getStatusCode(), response.getBody());
