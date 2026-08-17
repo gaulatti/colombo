@@ -567,6 +567,8 @@ class UploadServiceTest {
     void helperMethodsCoverBranches() throws Exception {
         assertEquals("k/file.jpg", invokePrivate("buildObjectKey", new Class[]{String.class, String.class}, "k", "file.jpg"));
         assertEquals("k/file.jpg", invokePrivate("buildObjectKey", new Class[]{String.class, String.class}, "k/", "file.jpg"));
+        assertEquals("image/jpeg", invokePrivate("resolveContentType", new Class[]{String.class}, "file.jpg"));
+        assertEquals("application/octet-stream", invokePrivate("resolveContentType", new Class[]{String.class}, "file.unknown"));
 
         assertTrue((boolean) invokePrivate("isExpiredCredentialError", new Class[]{S3Exception.class}, s3("ExpiredToken", 400)));
         assertTrue((boolean) invokePrivate("isExpiredCredentialError", new Class[]{S3Exception.class}, s3("RequestExpired", 400)));

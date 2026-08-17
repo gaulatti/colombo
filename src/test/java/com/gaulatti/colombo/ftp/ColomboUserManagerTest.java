@@ -16,6 +16,8 @@ import com.gaulatti.colombo.repository.TenantRepository;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
+import java.lang.reflect.Method;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ftpserver.ftplet.Authentication;
@@ -468,6 +470,68 @@ class ColomboUserManagerTest {
         assertTrue(!(boolean) method.invoke(manager, "   ", "pw"));
         assertTrue(!(boolean) method.invoke(manager, "master", "pw"));
         assertTrue((boolean) method.invoke(manager, "master", "master"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void namingPolicyExtractionCoversValidAbsentAndMalformedShapes() throws Exception {
+        ColomboUserManager manager = new ColomboUserManager(tenantRepository, restTemplate, sessions, "");
+        Method policyMethod = ColomboUserManager.class.getDeclaredMethod("extractNamingPolicy", Object.class);
+        policyMethod.setAccessible(true);
+        Method segmentsMethod = ColomboUserManager.class.getDeclaredMethod("extractNamingSegments", Object.class);
+        segmentsMethod.setAccessible(true);
+
+        assertEquals(null, policyMethod.invoke(manager, new Object[]{null}));
+        assertTrue(!((UploadNamingPolicy) policyMethod.invoke(manager, "bad")).isValid());
+        assertEquals(null, segmentsMethod.invoke(manager, "bad"));
+        assertEquals(null, segmentsMethod.invoke(manager, List.of("bad")));
+
+        Map<String, Object> literal = new HashMap<>();
+        literal.put("type", "literal");
+        literal.put("value", "FIXED-");
+        Map<String, Object> sequence = new HashMap<>();
+        sequence.put("type", "placeholder");
+        sequence.put("name", "sequence");
+        sequence.put("width", 6);
+        List<UploadNamingSegment> extracted =
+                (List<UploadNamingSegment>) segmentsMethod.invoke(manager, List.of(literal, sequence));
+        assertEquals(2, extracted.size());
+        assertEquals(null, extracted.get(0).getWidth());
+        assertEquals(6, extracted.get(1).getWidth());
+
+        Map<String, Object> policyMap = new HashMap<>();
+        policyMap.put("version", 1);
+        policyMap.put("assignmentSlug", "desk");
+        policyMap.put("path", List.of(literal));
+        policyMap.put("filename", List.of(sequence));
+        policyMap.put("timezone", "UTC");
+        policyMap.put("captureTimeFallback", "uploadedTime");
+        policyMap.put("case", "preserve");
+        assertTrue(((UploadNamingPolicy) policyMethod.invoke(manager, policyMap)).isValid());
+        policyMap.put("version", "one");
+        assertTrue(!((UploadNamingPolicy) policyMethod.invoke(manager, policyMap)).isValid());
+    }
+
+    @Test
+    void authenticationStoresCmsNamingPolicy() throws Exception {
+        when(tenantRepository.findByFtpUsername("acme-user")).thenReturn(Optional.of(tenant));
+        Map<String, Object> body = validValidationBody();
+        Map<String, Object> upload = (Map<String, Object>) body.get("upload");
+        upload.put("sequenceEndpoint", "/api/colombo/sequence");
+        upload.put("namingPolicy", Map.of(
+                "version", 1,
+                "assignmentSlug", "desk",
+                "path", List.of(),
+                "filename", List.of(Map.of("type", "placeholder", "name", "sequence", "width", 3)),
+                "timezone", "UTC",
+                "captureTimeFallback", "uploadedTime",
+                "case", "preserve"
+        ));
+        when(restTemplate.exchange(eq(tenant.getValidationEndpoint()), any(), any(), eq(Map.class)))
+                .thenReturn(new ResponseEntity<>(body, HttpStatus.OK));
+        ColomboUserManager manager = new ColomboUserManager(tenantRepository, restTemplate, sessions, "");
+        manager.authenticate(new UsernamePasswordAuthentication("acme-user", "pw"));
+        assertTrue(sessions.get("acme-user").getUploadCredentials().getNamingPolicy().isValid());
     }
 
     private Map<String, Object> validValidationBody() {

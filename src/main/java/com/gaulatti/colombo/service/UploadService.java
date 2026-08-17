@@ -3,11 +3,15 @@ package com.gaulatti.colombo.service;
 import com.gaulatti.colombo.ftp.ColomboUserManager;
 import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.ftp.SessionUploadCredentials;
+import com.gaulatti.colombo.ftp.UploadNamingPolicy;
 import com.gaulatti.colombo.model.Tenant;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.net.URI;
+import java.net.URLConnection;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -15,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -64,6 +69,8 @@ public class UploadService {
 
     /** Executor used for CMS photo callbacks after S3 upload succeeds. */
     private final Executor cmsCallbackExecutor;
+    private final UploadNameRenderer uploadNameRenderer;
+    private final CaptureTimeReader captureTimeReader;
 
     /**
      * Creates a new {@code UploadService}.
@@ -74,18 +81,34 @@ public class UploadService {
      * @param s3UploadExecutor   executor for asynchronous S3 upload processing
      * @param cmsCallbackExecutor executor for asynchronous CMS callback processing
      */
+    @Autowired
     public UploadService(
             ConcurrentHashMap<String, SessionData> sessions,
             RestTemplate restTemplate,
             ColomboUserManager colomboUserManager,
             @Qualifier("s3UploadExecutor") Executor s3UploadExecutor,
-            @Qualifier("cmsCallbackExecutor") Executor cmsCallbackExecutor
+            @Qualifier("cmsCallbackExecutor") Executor cmsCallbackExecutor,
+            UploadNameRenderer uploadNameRenderer,
+            CaptureTimeReader captureTimeReader
     ) {
         this.sessions = sessions;
         this.restTemplate = restTemplate;
         this.colomboUserManager = colomboUserManager;
         this.s3UploadExecutor = s3UploadExecutor;
         this.cmsCallbackExecutor = cmsCallbackExecutor;
+        this.uploadNameRenderer = uploadNameRenderer;
+        this.captureTimeReader = captureTimeReader;
+    }
+
+    public UploadService(
+            ConcurrentHashMap<String, SessionData> sessions,
+            RestTemplate restTemplate,
+            ColomboUserManager colomboUserManager,
+            Executor s3UploadExecutor,
+            Executor cmsCallbackExecutor
+    ) {
+        this(sessions, restTemplate, colomboUserManager, s3UploadExecutor, cmsCallbackExecutor,
+                new UploadNameRenderer(), new CaptureTimeReader());
     }
 
     /**
@@ -107,7 +130,8 @@ public class UploadService {
             return false;
         }
         SessionData activeSession = result.sessionData();
-        postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username);
+        postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username,
+                result.originalFilename(), result.targetFilename());
         return true;
     }
 
@@ -172,7 +196,9 @@ public class UploadService {
                     result.sessionData().getTenant(),
                     result.sessionData().getAssignmentId(),
                     result.s3Url(),
-                    username
+                    username,
+                    result.originalFilename(),
+                    result.targetFilename()
             );
 
             log.info("[UPLOAD] background complete username='{}' assignmentId='{}' s3Url='{}'",
@@ -186,8 +212,8 @@ public class UploadService {
     }
 
     private UploadResult processHttpUploadToS3(SessionData sessionData, String username, String filename, Path localPath) {
-        String s3Url = uploadToS3(sessionData, username, filename, localPath.toFile());
-        return UploadResult.success(sessionData, s3Url);
+        NamedUpload upload = uploadToS3Named(sessionData, username, filename, localPath.toFile());
+        return UploadResult.success(sessionData, upload.s3Url(), filename, upload.targetFilename());
     }
 
     private CompletableFuture<Boolean> queuePhotoCallback(UploadResult result, String username) {
@@ -196,7 +222,8 @@ public class UploadService {
         }
         SessionData activeSession = result.sessionData();
         return CompletableFuture.supplyAsync(() -> {
-            postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username);
+            postPhotoCallback(activeSession.getTenant(), activeSession.getAssignmentId(), result.s3Url(), username,
+                    result.originalFilename(), result.targetFilename());
             return true;
         }, cmsCallbackExecutor);
     }
@@ -223,9 +250,14 @@ public class UploadService {
      * @return the resulting S3 URL in {@code s3://bucket/key} format
      */
     public String uploadToS3(SessionData sessionData, String username, String filename, File localFile) {
+        return uploadToS3Named(sessionData, username, filename, localFile).s3Url();
+    }
+
+    private NamedUpload uploadToS3Named(SessionData sessionData, String username, String filename, File localFile) {
         String assignmentId = sessionData.getAssignmentId();
         SessionUploadCredentials uploadCredentials = sessionData.getUploadCredentials();
-        String s3Key = buildObjectKey(uploadCredentials.getKeyPrefix(), filename);
+        String targetFilename = resolveTargetFilename(sessionData, filename, localFile);
+        String s3Key = buildObjectKey(uploadCredentials.getKeyPrefix(), targetFilename);
         String bucket = uploadCredentials.getBucket();
 
         log.info("[S3 UPLOAD] start username='{}' assignmentId='{}' localFile='{}' bucket='{}' key='{}'",
@@ -234,12 +266,57 @@ public class UploadService {
         PutObjectRequest putObjectRequest = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(s3Key)
+                .contentType(resolveContentType(filename))
                 .build();
         client.putObject(putObjectRequest, RequestBody.fromFile(localFile.toPath()));
 
         String s3Url = "s3://" + bucket + "/" + s3Key;
         log.info("[S3 UPLOAD] success username='{}' assignmentId='{}' file='{}'", username, assignmentId, filename);
-        return s3Url;
+        return new NamedUpload(s3Url, targetFilename);
+    }
+
+    @SuppressWarnings("rawtypes")
+    private String resolveTargetFilename(SessionData sessionData, String originalFilename, File localFile) {
+        SessionUploadCredentials credentials = sessionData.getUploadCredentials();
+        UploadNamingPolicy policy = credentials.getNamingPolicy();
+        if (policy == null) {
+            return originalFilename;
+        }
+
+        String endpoint = resolveCmsEndpoint(sessionData.getTenant().getValidationEndpoint(), credentials.getSequenceEndpoint());
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(API_KEY_HEADER, sessionData.getTenant().getApiKey());
+        Map<String, String> body = Map.of("assignment_id", sessionData.getAssignmentId());
+        ResponseEntity<Map> response = restTemplate.exchange(
+                endpoint, HttpMethod.POST, new HttpEntity<>(body, headers), Map.class);
+        Object rawSequence = response.getBody() == null ? null : response.getBody().get("sequence");
+        long sequence;
+        if (rawSequence instanceof Number number) {
+            sequence = number.longValue();
+        } else if (rawSequence instanceof String string) {
+            sequence = Long.parseLong(string);
+        } else {
+            throw new IllegalStateException("CMS sequence response is invalid");
+        }
+        if (sequence < 1) {
+            throw new IllegalStateException("CMS sequence response is invalid");
+        }
+        Instant uploadedAt = Instant.now();
+        Instant capturedAt = captureTimeReader.read(localFile);
+        return uploadNameRenderer.render(
+                policy, sessionData.getAssignmentId(), originalFilename, capturedAt, uploadedAt, sequence);
+    }
+
+    private String resolveCmsEndpoint(String validationEndpoint, String sequenceEndpoint) {
+        if (sequenceEndpoint == null || sequenceEndpoint.isBlank()) {
+            throw new IllegalStateException("CMS naming policy is missing its sequence endpoint");
+        }
+        return URI.create(validationEndpoint).resolve(sequenceEndpoint).toString();
+    }
+
+    private String resolveContentType(String filename) {
+        String detected = URLConnection.guessContentTypeFromName(filename);
+        return detected == null ? "application/octet-stream" : detected;
     }
 
     /**
@@ -254,12 +331,26 @@ public class UploadService {
      * @param username     the username (used for session eviction on denial and logging)
      */
     public void postPhotoCallback(Tenant tenant, String assignmentId, String s3Url, String username) {
+        String filename = extractFilenameFromS3Url(s3Url);
+        postPhotoCallback(tenant, assignmentId, s3Url, username, filename, filename);
+    }
+
+    private void postPhotoCallback(
+            Tenant tenant,
+            String assignmentId,
+            String s3Url,
+            String username,
+            String originalFilename,
+            String targetFilename
+    ) {
         HttpHeaders headers = new HttpHeaders();
         headers.set(API_KEY_HEADER, tenant.getApiKey());
 
         Map<String, String> body = new LinkedHashMap<>();
         body.put("assignment_id", assignmentId);
         body.put("s3_url", s3Url);
+        body.put("original_filename", originalFilename);
+        body.put("target_filename", targetFilename);
 
         log.info("[PHOTO CALLBACK] sending assignmentId='{}' file='{}'",
                 assignmentId, extractFilenameFromS3Url(s3Url));
@@ -311,8 +402,8 @@ public class UploadService {
         }
 
         try {
-            String s3Url = uploadToS3(sessionData, username, filename, localFile);
-            return UploadResult.success(sessionData, s3Url);
+            NamedUpload upload = uploadToS3Named(sessionData, username, filename, localFile);
+            return UploadResult.success(sessionData, upload.s3Url(), filename, upload.targetFilename());
         } catch (S3Exception s3Exception) {
             if (isExpiredCredentialError(s3Exception)) {
                 log.warn("[S3 UPLOAD] expired credentials username='{}' — refreshing via validate endpoint", username);
@@ -327,10 +418,8 @@ public class UploadService {
                     return UploadResult.failure();
                 }
                 try {
-                    return UploadResult.success(
-                            refreshedSession,
-                            uploadToS3(refreshedSession, username, filename, localFile)
-                    );
+                    NamedUpload upload = uploadToS3Named(refreshedSession, username, filename, localFile);
+                    return UploadResult.success(refreshedSession, upload.s3Url(), filename, upload.targetFilename());
                 } catch (S3Exception retryException) {
                     if (isDeniedUploadError(retryException) || isExpiredCredentialError(retryException)) {
                         colomboUserManager.evictSession(username, "S3 denied after credential refresh");
@@ -467,6 +556,8 @@ public class UploadService {
 
         /** The resulting S3 URL; {@code null} on failure. */
         private final String s3Url;
+        private final String originalFilename;
+        private final String targetFilename;
 
         /**
          * Creates an {@code UploadResult}.
@@ -475,10 +566,13 @@ public class UploadService {
          * @param sessionData the session that performed the upload
          * @param s3Url       the S3 URL of the uploaded object
          */
-        private UploadResult(boolean success, SessionData sessionData, String s3Url) {
+        private UploadResult(boolean success, SessionData sessionData, String s3Url,
+                             String originalFilename, String targetFilename) {
             this.success = success;
             this.sessionData = sessionData;
             this.s3Url = s3Url;
+            this.originalFilename = originalFilename;
+            this.targetFilename = targetFilename;
         }
 
         /**
@@ -489,7 +583,13 @@ public class UploadService {
          * @return a successful {@code UploadResult}
          */
         static UploadResult success(SessionData sessionData, String s3Url) {
-            return new UploadResult(true, sessionData, s3Url);
+            String filename = s3Url == null ? null : s3Url.substring(s3Url.lastIndexOf('/') + 1);
+            return success(sessionData, s3Url, filename, filename);
+        }
+
+        static UploadResult success(SessionData sessionData, String s3Url,
+                                    String originalFilename, String targetFilename) {
+            return new UploadResult(true, sessionData, s3Url, originalFilename, targetFilename);
         }
 
         /**
@@ -498,7 +598,7 @@ public class UploadService {
          * @return a failed {@code UploadResult}
          */
         static UploadResult failure() {
-            return new UploadResult(false, null, null);
+            return new UploadResult(false, null, null, null, null);
         }
 
         /**
@@ -527,5 +627,16 @@ public class UploadService {
         String s3Url() {
             return s3Url;
         }
+
+        String originalFilename() {
+            return originalFilename;
+        }
+
+        String targetFilename() {
+            return targetFilename;
+        }
+    }
+
+    private record NamedUpload(String s3Url, String targetFilename) {
     }
 }

@@ -1,6 +1,5 @@
 package com.gaulatti.colombo.ftp;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
 /**
@@ -11,7 +10,6 @@ import lombok.Data;
  * Use {@link #isValid()} to verify completeness before attempting an S3 transfer.
  */
 @Data
-@AllArgsConstructor
 public class SessionUploadCredentials {
 
     /** 
@@ -49,6 +47,46 @@ public class SessionUploadCredentials {
      */
     private String expiresAt;
 
+    /** Optional naming policy; absent means legacy original-filename behavior. */
+    private UploadNamingPolicy namingPolicy;
+
+    /** CMS endpoint used to allocate an assignment-scoped sequence. */
+    private String sequenceEndpoint;
+
+    public SessionUploadCredentials(
+            String accessKeyId,
+            String secretAccessKey,
+            String sessionToken,
+            String region,
+            String bucket,
+            String keyPrefix,
+            String expiresAt
+    ) {
+        this(accessKeyId, secretAccessKey, sessionToken, region, bucket, keyPrefix, expiresAt, null, null);
+    }
+
+    public SessionUploadCredentials(
+            String accessKeyId,
+            String secretAccessKey,
+            String sessionToken,
+            String region,
+            String bucket,
+            String keyPrefix,
+            String expiresAt,
+            UploadNamingPolicy namingPolicy,
+            String sequenceEndpoint
+    ) {
+        this.accessKeyId = accessKeyId;
+        this.secretAccessKey = secretAccessKey;
+        this.sessionToken = sessionToken;
+        this.region = region;
+        this.bucket = bucket;
+        this.keyPrefix = keyPrefix;
+        this.expiresAt = expiresAt;
+        this.namingPolicy = namingPolicy;
+        this.sequenceEndpoint = sequenceEndpoint;
+    }
+
     /**
      * Returns {@code true} if all credential and destination fields are present and non-blank,
      * indicating that this object is safe to use for an S3 upload.
@@ -56,13 +94,16 @@ public class SessionUploadCredentials {
      * @return {@code true} when all required fields are populated
      */
     public boolean isValid() {
-        return isNonBlank(accessKeyId)
+        boolean credentialsValid = isNonBlank(accessKeyId)
                 && isNonBlank(secretAccessKey)
                 && isNonBlank(sessionToken)
                 && isNonBlank(region)
                 && isNonBlank(bucket)
                 && isNonBlank(keyPrefix)
                 && isNonBlank(expiresAt);
+        boolean namingValid = namingPolicy == null
+                || (namingPolicy.isValid() && isNonBlank(sequenceEndpoint));
+        return credentialsValid && namingValid;
     }
 
     /**

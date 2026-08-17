@@ -3,6 +3,8 @@ package com.gaulatti.colombo.ftp;
 import com.gaulatti.colombo.model.Tenant;
 import com.gaulatti.colombo.repository.TenantRepository;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ftpserver.ftplet.Authentication;
@@ -82,6 +84,8 @@ public class ColomboUserManager implements UserManager {
      * Credential expiry timestamp field within the upload credentials block.
      */
     private static final String EXPIRES_AT_KEY = "expiresAt";
+    private static final String NAMING_POLICY_KEY = "namingPolicy";
+    private static final String SEQUENCE_ENDPOINT_KEY = "sequenceEndpoint";
 
     /**
      * Repository for resolving tenants by FTP username.
@@ -314,8 +318,52 @@ public class ColomboUserManager implements UserManager {
                 asString(uploadMap.get(REGION_KEY)),
                 asString(uploadMap.get(BUCKET_KEY)),
                 asString(uploadMap.get(KEY_PREFIX_KEY)),
-                asString(uploadMap.get(EXPIRES_AT_KEY))
+                asString(uploadMap.get(EXPIRES_AT_KEY)),
+                extractNamingPolicy(uploadMap.get(NAMING_POLICY_KEY)),
+                asString(uploadMap.get(SEQUENCE_ENDPOINT_KEY))
         );
+    }
+
+    @SuppressWarnings("rawtypes")
+    private UploadNamingPolicy extractNamingPolicy(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map policyMap)) {
+            return new UploadNamingPolicy();
+        }
+        Number version = policyMap.get("version") instanceof Number number ? number : 0;
+        return new UploadNamingPolicy(
+                version.intValue(),
+                asString(policyMap.get("assignmentSlug")),
+                extractNamingSegments(policyMap.get("path")),
+                extractNamingSegments(policyMap.get("filename")),
+                asString(policyMap.get("timezone")),
+                asString(policyMap.get("captureTimeFallback")),
+                asString(policyMap.get("case"))
+        );
+    }
+
+    @SuppressWarnings("rawtypes")
+    private List<UploadNamingSegment> extractNamingSegments(Object value) {
+        if (!(value instanceof List list)) {
+            return null;
+        }
+        List<UploadNamingSegment> segments = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map segmentMap)) {
+                return null;
+            }
+            Number width = segmentMap.get("width") instanceof Number number ? number : null;
+            segments.add(new UploadNamingSegment(
+                    asString(segmentMap.get("type")),
+                    asString(segmentMap.get("value")),
+                    asString(segmentMap.get("name")),
+                    asString(segmentMap.get("format")),
+                    width == null ? null : width.intValue()
+            ));
+        }
+        return segments;
     }
 
     /**
