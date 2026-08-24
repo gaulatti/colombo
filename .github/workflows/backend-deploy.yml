@@ -65,6 +65,7 @@ jobs:
             --build-arg PORT=${{ vars.HTTP_PORT || '8080' }} \
             --build-arg COLOMBO_FTP_PORT=${{ vars.COLOMBO_FTP_PORT || '21' }} \
             --build-arg COLOMBO_FTP_PASSIVE_PORTS=${{ vars.COLOMBO_FTP_PASSIVE_PORTS || '60000-60100' }} \
+            --build-arg COLOMBO_BUILD_VERSION=${{ github.sha }} \
             -t ghcr.io/${{ github.repository }}:latest .
 
       - name: Push Docker image to GHCR
@@ -128,6 +129,7 @@ jobs:
                 -e JPA_DDL_AUTO=${{ vars.JPA_DDL_AUTO }} \
                 -e FLYWAY_ENABLED=${{ vars.FLYWAY_ENABLED }} \
                 -e FLYWAY_BASELINE_ON_MIGRATE=${{ vars.FLYWAY_BASELINE_ON_MIGRATE }} \
+                -e COLOMBO_METRICS_TOKEN=${{ secrets.COLOMBO_METRICS_TOKEN }} \
                 --restart=always \
                 ghcr.io/${{ github.repository }}:latest
             '

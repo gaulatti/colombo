@@ -5,6 +5,8 @@ import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.ftp.SessionUploadCredentials;
 import com.gaulatti.colombo.ftp.UploadNamingPolicy;
 import com.gaulatti.colombo.model.Tenant;
+import com.gaulatti.colombo.observability.ColomboMetrics;
+import io.micrometer.core.instrument.Timer;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -71,6 +73,7 @@ public class UploadService {
     private final Executor cmsCallbackExecutor;
     private final UploadNameRenderer uploadNameRenderer;
     private final CaptureTimeReader captureTimeReader;
+    private final ColomboMetrics metrics;
 
     /**
      * Creates a new {@code UploadService}.
@@ -89,7 +92,8 @@ public class UploadService {
             @Qualifier("s3UploadExecutor") Executor s3UploadExecutor,
             @Qualifier("cmsCallbackExecutor") Executor cmsCallbackExecutor,
             UploadNameRenderer uploadNameRenderer,
-            CaptureTimeReader captureTimeReader
+            CaptureTimeReader captureTimeReader,
+            ColomboMetrics metrics
     ) {
         this.sessions = sessions;
         this.restTemplate = restTemplate;
@@ -98,6 +102,7 @@ public class UploadService {
         this.cmsCallbackExecutor = cmsCallbackExecutor;
         this.uploadNameRenderer = uploadNameRenderer;
         this.captureTimeReader = captureTimeReader;
+        this.metrics = metrics;
     }
 
     public UploadService(
@@ -108,7 +113,20 @@ public class UploadService {
             Executor cmsCallbackExecutor
     ) {
         this(sessions, restTemplate, colomboUserManager, s3UploadExecutor, cmsCallbackExecutor,
-                new UploadNameRenderer(), new CaptureTimeReader());
+                new UploadNameRenderer(), new CaptureTimeReader(), ColomboMetrics.noop());
+    }
+
+    public UploadService(
+            ConcurrentHashMap<String, SessionData> sessions,
+            RestTemplate restTemplate,
+            ColomboUserManager colomboUserManager,
+            Executor s3UploadExecutor,
+            Executor cmsCallbackExecutor,
+            UploadNameRenderer uploadNameRenderer,
+            CaptureTimeReader captureTimeReader
+    ) {
+        this(sessions, restTemplate, colomboUserManager, s3UploadExecutor, cmsCallbackExecutor,
+                uploadNameRenderer, captureTimeReader, ColomboMetrics.noop());
     }
 
     /**
@@ -149,9 +167,12 @@ public class UploadService {
      *         recoverable failure, or exceptionally on unexpected errors
      */
     public CompletableFuture<Boolean> processFtpUploadAsync(String username, String filename, File localFile) {
+        metrics.upload("ftp", "accepted", "queued");
         return CompletableFuture
                 .supplyAsync(() -> uploadToS3WithRefresh(username, filename, localFile), s3UploadExecutor)
-                .thenCompose(result -> queuePhotoCallback(result, username));
+                .thenCompose(result -> queuePhotoCallback(result, username))
+                .whenComplete((success, throwable) -> metrics.upload(
+                        "ftp", "complete", Boolean.TRUE.equals(success) ? "success" : "failure"));
     }
 
     /**
@@ -167,6 +188,7 @@ public class UploadService {
      * @param localPath   the temporary file containing the received upload
      */
     public void processHttpUploadAsync(SessionData sessionData, String username, String filename, Path localPath) {
+        metrics.upload("http", "accepted", "queued");
         CompletableFuture<UploadResult> s3Upload = CompletableFuture.supplyAsync(
                 () -> processHttpUploadToS3(sessionData, username, filename, localPath),
                 s3UploadExecutor
@@ -182,6 +204,8 @@ public class UploadService {
                             return success;
                         }))
                 .whenComplete((success, throwable) -> {
+                    metrics.upload("http", "complete",
+                            Boolean.TRUE.equals(success) ? "success" : "failure");
                     if (throwable != null) {
                         log.error("[UPLOAD] background upload or callback failed username='{}' filename='{}'",
                                 username, filename, throwable);
@@ -268,7 +292,19 @@ public class UploadService {
                 .key(s3Key)
                 .contentType(resolveContentType(filename))
                 .build();
-        client.putObject(putObjectRequest, RequestBody.fromFile(localFile.toPath()));
+        Timer.Sample sample = metrics.startDependency();
+        try {
+            client.putObject(putObjectRequest, RequestBody.fromFile(localFile.toPath()));
+            metrics.dependency(sample, "s3", "put_object", "success");
+        } catch (S3Exception exception) {
+            String result = isExpiredCredentialError(exception) ? "expired"
+                    : isDeniedUploadError(exception) ? "denied" : "error";
+            metrics.dependency(sample, "s3", "put_object", result);
+            throw exception;
+        } catch (RuntimeException exception) {
+            metrics.dependency(sample, "s3", "put_object", "error");
+            throw exception;
+        }
 
         String s3Url = "s3://" + bucket + "/" + s3Key;
         log.info("[S3 UPLOAD] success username='{}' assignmentId='{}' file='{}'", username, assignmentId, filename);
@@ -343,6 +379,7 @@ public class UploadService {
             String originalFilename,
             String targetFilename
     ) {
+        Timer.Sample sample = metrics.startDependency();
         HttpHeaders headers = new HttpHeaders();
         headers.set(API_KEY_HEADER, tenant.getApiKey());
 
@@ -370,11 +407,17 @@ public class UploadService {
                 throw new IllegalStateException("Photo callback failed with status: " + response.getStatusCode());
             }
 
+            metrics.dependency(sample, "cms", "photo_callback", "success");
             log.info("[PHOTO CALLBACK] accepted assignmentId='{}' status='{}'", assignmentId, response.getStatusCode());
         } catch (HttpStatusCodeException ex) {
             if (ex.getStatusCode().is4xxClientError()) {
                 colomboUserManager.evictSession(username, "photo callback denied");
             }
+            metrics.dependency(sample, "cms", "photo_callback",
+                    ex.getStatusCode().is4xxClientError() ? "denied" : "error");
+            throw ex;
+        } catch (RuntimeException ex) {
+            metrics.dependency(sample, "cms", "photo_callback", "error");
             throw ex;
         }
     }
@@ -406,21 +449,26 @@ public class UploadService {
             return UploadResult.success(sessionData, upload.s3Url(), filename, upload.targetFilename());
         } catch (S3Exception s3Exception) {
             if (isExpiredCredentialError(s3Exception)) {
+                metrics.retry("s3_put", "started");
                 log.warn("[S3 UPLOAD] expired credentials username='{}' — refreshing via validate endpoint", username);
                 ColomboUserManager.RefreshResult refreshResult = colomboUserManager.refreshSessionFromValidation(username);
                 if (refreshResult != ColomboUserManager.RefreshResult.REFRESHED) {
+                    metrics.retry("s3_put", "abandoned");
                     colomboUserManager.evictSession(username, "validate refresh denied/failed after expired S3 credentials");
                     return UploadResult.failure();
                 }
                 SessionData refreshedSession = sessions.get(username);
                 if (refreshedSession == null || !isValidSessionForUpload(username, refreshedSession)) {
+                    metrics.retry("s3_put", "abandoned");
                     colomboUserManager.evictSession(username, "refreshed session invalid after validate refresh");
                     return UploadResult.failure();
                 }
                 try {
                     NamedUpload upload = uploadToS3Named(refreshedSession, username, filename, localFile);
+                    metrics.retry("s3_put", "success");
                     return UploadResult.success(refreshedSession, upload.s3Url(), filename, upload.targetFilename());
                 } catch (S3Exception retryException) {
+                    metrics.retry("s3_put", "failure");
                     if (isDeniedUploadError(retryException) || isExpiredCredentialError(retryException)) {
                         colomboUserManager.evictSession(username, "S3 denied after credential refresh");
                     }

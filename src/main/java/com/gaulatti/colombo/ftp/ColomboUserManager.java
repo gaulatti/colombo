@@ -2,6 +2,8 @@ package com.gaulatti.colombo.ftp;
 
 import com.gaulatti.colombo.model.Tenant;
 import com.gaulatti.colombo.repository.TenantRepository;
+import com.gaulatti.colombo.observability.ColomboMetrics;
+import io.micrometer.core.instrument.Timer;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
@@ -107,6 +109,7 @@ public class ColomboUserManager implements UserManager {
      * Intended solely for support access.
      */
     private final String configuredMasterPassword;
+    private final ColomboMetrics metrics;
 
     /**
      * Creates a new {@code ColomboUserManager}.
@@ -120,12 +123,23 @@ public class ColomboUserManager implements UserManager {
             TenantRepository tenantRepository,
             RestTemplate restTemplate,
             ConcurrentHashMap<String, SessionData> sessions,
-            String configuredMasterPassword
+            String configuredMasterPassword,
+            ColomboMetrics metrics
     ) {
         this.tenantRepository = tenantRepository;
         this.restTemplate = restTemplate;
         this.sessions = sessions;
         this.configuredMasterPassword = configuredMasterPassword;
+        this.metrics = metrics;
+    }
+
+    public ColomboUserManager(
+            TenantRepository tenantRepository,
+            RestTemplate restTemplate,
+            ConcurrentHashMap<String, SessionData> sessions,
+            String configuredMasterPassword
+    ) {
+        this(tenantRepository, restTemplate, sessions, configuredMasterPassword, ColomboMetrics.noop());
     }
 
     /**
@@ -217,6 +231,7 @@ public class ColomboUserManager implements UserManager {
     @Override
     public User authenticate(Authentication authentication) throws AuthenticationFailedException {
         if (!(authentication instanceof UsernamePasswordAuthentication usernamePasswordAuthentication)) {
+            metrics.authentication("ftp", "unsupported");
             log.warn("[AUTH] unsupported authentication type='{}'", authentication.getClass().getSimpleName());
             throw new AuthenticationFailedException("Unsupported authentication type");
         }
@@ -228,6 +243,7 @@ public class ColomboUserManager implements UserManager {
 
         Tenant tenant = tenantRepository.findByFtpUsername(username)
                 .orElseThrow(() -> {
+                    metrics.authentication("ftp", "unknown_user");
                     log.warn("[AUTH] unknown FTP user username='{}'", username);
                     return new AuthenticationFailedException("Unknown FTP user");
                 });
@@ -243,6 +259,7 @@ public class ColomboUserManager implements UserManager {
                 System.getProperty("COLOMBO_DEV_PASSWORD")
         );
         if (isMasterPasswordBypass(masterPassword, password)) {
+            metrics.authentication("ftp", "support_bypass");
             String supportAssignmentId = "support-assignment-" + username;
             log.warn("[AUTH] MASTER PASSWORD support bypass used for username='{}' assignmentId='{}'",
                     username, supportAssignmentId);
@@ -252,10 +269,12 @@ public class ColomboUserManager implements UserManager {
 
         ValidationResult validationResult = validateAgainstCms(tenant, username, password, "login");
         if (validationResult.status == ValidationStatus.DENIED) {
+            metrics.authentication("ftp", "denied");
             sessions.remove(username);
             throw new AuthenticationFailedException("Tenant validation rejected credentials");
         }
         if (validationResult.status != ValidationStatus.SUCCESS) {
+            metrics.authentication("ftp", "unavailable");
             throw new AuthenticationFailedException("Tenant validation request failed");
         }
         SessionData refreshedSession = validationResult.sessionData;
@@ -264,6 +283,7 @@ public class ColomboUserManager implements UserManager {
                 refreshedSession.getUploadCredentials().getBucket(), refreshedSession.getUploadCredentials().getRegion(),
                 refreshedSession.getUploadCredentials().getKeyPrefix());
         sessions.put(username, refreshedSession);
+        metrics.authentication("ftp", "success");
         return new ColomboUser(tenant);
     }
 
@@ -389,6 +409,7 @@ public class ColomboUserManager implements UserManager {
     public RefreshResult refreshSessionFromValidation(String username) {
         SessionData existingSession = sessions.get(username);
         if (existingSession == null) {
+            metrics.retry("credential_refresh", "not_found");
             return RefreshResult.NOT_FOUND;
         }
 
@@ -400,6 +421,7 @@ public class ColomboUserManager implements UserManager {
             log.warn("[AUTH REFRESH] missing refresh context for username='{}' tenantPresent='{}' keyPresent='{}'",
                 username, tenant != null, validationKeyPresent);
             sessions.remove(username);
+            metrics.retry("credential_refresh", "denied");
             return RefreshResult.DENIED;
         }
 
@@ -412,16 +434,19 @@ public class ColomboUserManager implements UserManager {
                     refreshedSession.getUploadCredentials().getBucket(),
                     refreshedSession.getUploadCredentials().getRegion(),
                     refreshedSession.getUploadCredentials().getKeyPrefix());
+            metrics.retry("credential_refresh", "success");
             return RefreshResult.REFRESHED;
         }
 
         if (validationResult.status == ValidationStatus.DENIED) {
             sessions.remove(username);
             log.warn("[AUTH REFRESH] denied username='{}' — evicting session", username);
+            metrics.retry("credential_refresh", "denied");
             return RefreshResult.DENIED;
         }
 
         log.error("[AUTH REFRESH] failed username='{}' due to validation transport/server error", username);
+        metrics.retry("credential_refresh", "unavailable");
         return RefreshResult.ERROR;
     }
 
@@ -455,13 +480,16 @@ public class ColomboUserManager implements UserManager {
             throws org.apache.ftpserver.ftplet.AuthenticationFailedException {
         ValidationResult result = validateAgainstCms(tenant, username, password, "upload");
         if (result.status == ValidationStatus.DENIED) {
+            metrics.authentication("http_upload", "denied");
             throw new org.apache.ftpserver.ftplet.AuthenticationFailedException(
                     "CMS rejected credentials for username: " + username);
         }
         if (result.status != ValidationStatus.SUCCESS) {
+            metrics.authentication("http_upload", "unavailable");
             throw new org.apache.ftpserver.ftplet.AuthenticationFailedException(
                     "CMS validation request failed for username: " + username);
         }
+        metrics.authentication("http_upload", "success");
         return result.sessionData;
     }
 
@@ -480,6 +508,7 @@ public class ColomboUserManager implements UserManager {
      */
     @SuppressWarnings("rawtypes")
     private ValidationResult validateAgainstCms(Tenant tenant, String username, String password, String flow) {
+        Timer.Sample sample = metrics.startDependency();
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-Colombo-API-Key", tenant.getApiKey());
 
@@ -498,15 +527,15 @@ public class ColomboUserManager implements UserManager {
             if (ex.getStatusCode().is4xxClientError()) {
                 log.warn("[AUTH {}] validation denied username='{}' status='{}' body='{}'",
                         flow.toUpperCase(), username, ex.getStatusCode(), ex.getResponseBodyAsString());
-                return ValidationResult.denied();
+                return finishValidation(sample, flow, ValidationResult.denied());
             }
             log.error("[AUTH {}] validation request failed username='{}' endpoint='{}' status='{}'",
                     flow.toUpperCase(), username, tenant.getValidationEndpoint(), ex.getStatusCode(), ex);
-            return ValidationResult.error();
+            return finishValidation(sample, flow, ValidationResult.error());
         } catch (RuntimeException ex) {
             log.error("[AUTH {}] validation request failed username='{}' endpoint='{}'",
                     flow.toUpperCase(), username, tenant.getValidationEndpoint(), ex);
-            return ValidationResult.error();
+            return finishValidation(sample, flow, ValidationResult.error());
         }
 
         log.info("[AUTH {}] CMS responded for username='{}' status='{}'",
@@ -516,11 +545,11 @@ public class ColomboUserManager implements UserManager {
             if (response.getStatusCode().is4xxClientError()) {
                 log.warn("[AUTH {}] validation rejected for username='{}' status='{}' body='{}'",
                         flow.toUpperCase(), username, response.getStatusCode(), response.getBody());
-                return ValidationResult.denied();
+                return finishValidation(sample, flow, ValidationResult.denied());
             }
             log.error("[AUTH {}] validation upstream non-OK for username='{}' status='{}' body='{}'",
                     flow.toUpperCase(), username, response.getStatusCode(), response.getBody());
-            return ValidationResult.error();
+            return finishValidation(sample, flow, ValidationResult.error());
         }
 
         String assignmentId = extractAssignmentId(response.getBody());
@@ -530,16 +559,25 @@ public class ColomboUserManager implements UserManager {
         if (assignmentId == null || assignmentId.isBlank()) {
             log.warn("[AUTH {}] validation response invalid for username='{}' assignmentId='{}' uploadCredentialsValid='{}'",
                 flow.toUpperCase(), username, assignmentId, uploadCredentialsValid);
-            return ValidationResult.denied();
+            return finishValidation(sample, flow, ValidationResult.denied());
         }
 
         if (!uploadCredentialsValid) {
             log.warn("[AUTH {}] validation response invalid for username='{}' assignmentId='{}' uploadCredentialsValid='{}'",
                 flow.toUpperCase(), username, assignmentId, uploadCredentialsValid);
-            return ValidationResult.denied();
+            return finishValidation(sample, flow, ValidationResult.denied());
         }
 
-        return ValidationResult.success(new SessionData(tenant, assignmentId, uploadCredentials, password));
+        return finishValidation(
+                sample,
+                flow,
+                ValidationResult.success(new SessionData(tenant, assignmentId, uploadCredentials, password))
+        );
+    }
+
+    private ValidationResult finishValidation(Timer.Sample sample, String flow, ValidationResult result) {
+        metrics.dependency(sample, "cms", "validation_" + flow, result.status.name().toLowerCase());
+        return result;
     }
 
     /**
