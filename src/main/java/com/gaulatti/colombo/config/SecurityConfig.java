@@ -5,6 +5,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 
 /**
  * Spring Security configuration for Colombo.
@@ -13,9 +14,8 @@ import org.springframework.security.web.SecurityFilterChain;
  * (delegating to the CMS via {@link com.gaulatti.colombo.ftp.ColomboUserManager}),
  * so it is permitted without Spring Security authentication.
  *
- * <p>Actuator endpoints are also permitted to support infrastructure monitoring
- * (health checks, metrics) which is typically protected at the network/proxy layer
- * rather than at the application level.
+ * <p>The health actuator is public for infrastructure probes. The Prometheus actuator
+ * is protected by a dedicated bearer credential in {@link MetricsTokenFilter}.
  *
  * <h3>CSRF</h3>
  * CSRF protection is disabled for the entire application because:
@@ -29,6 +29,12 @@ import org.springframework.security.web.SecurityFilterChain;
 @Configuration
 public class SecurityConfig {
 
+    private final MetricsTokenFilter metricsTokenFilter;
+
+    public SecurityConfig(MetricsTokenFilter metricsTokenFilter) {
+        this.metricsTokenFilter = metricsTokenFilter;
+    }
+
     /**
      * Configures the security filter chain.
      *
@@ -37,9 +43,9 @@ public class SecurityConfig {
     *       uptime probe and quick manual verification.</li>
      *   <li>{@code POST /upload} — permitted without Spring Security authentication;
      *       the controller performs its own CMS credential validation.</li>
-     *   <li>Actuator endpoints ({@code /actuator/**}) — permitted for infrastructure
-     *       monitoring; protect at the network layer (e.g., nginx ACL or ALB security
-     *       group) in production.</li>
+     *   <li>{@code /actuator/health} — public for infrastructure health probes.</li>
+     *   <li>{@code /actuator/prometheus} — permitted only after the metrics-token
+     *       filter accepts its dedicated bearer credential.</li>
      *   <li>All other requests — require authentication (Spring Security default).</li>
      * </ul>
      *
@@ -55,10 +61,12 @@ public class SecurityConfig {
             // endpoint accepts state-mutating browser-initiated requests that would
             // be vulnerable to CSRF.
             .csrf(AbstractHttpConfigurer::disable)
+            .addFilterBefore(metricsTokenFilter, AuthorizationFilter.class)
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/").permitAll()
                 .requestMatchers("/upload").permitAll()
-                .requestMatchers("/actuator/**").permitAll()
+                .requestMatchers("/actuator/health").permitAll()
+                .requestMatchers("/actuator/prometheus").permitAll()
                 .anyRequest().authenticated()
             );
         return http.build();

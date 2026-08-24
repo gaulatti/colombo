@@ -116,6 +116,19 @@ class UploadNameRendererTest {
     }
 
     @Test
+    void renderSegmentsRejectsUnsupportedTypeAtItsDefensiveBoundary() throws Exception {
+        Method renderSegments = UploadNameRenderer.class.getDeclaredMethod(
+                "renderSegments", List.class,
+                Class.forName("com.gaulatti.colombo.service.UploadNameRenderer$RenderContext"));
+        renderSegments.setAccessible(true);
+        InvocationTargetException thrown = assertThrows(
+                InvocationTargetException.class,
+                () -> renderSegments.invoke(renderer,
+                        List.of(new UploadNamingSegment("unsupported", null, null, null, null)), null));
+        assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
+    }
+
+    @Test
     void policyValidationCoversEveryField() {
         UploadNamingPolicy policy = policy("preserve", "uploadedTime");
         assertEquals(true, policy.isValid());

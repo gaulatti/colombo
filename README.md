@@ -38,6 +38,17 @@ make run
 
 FTP server starts on **port 2121** in development. HTTP/actuator on **port 8080**.
 
+Prometheus metrics are exposed privately at `GET /actuator/prometheus`. Set a
+dedicated `COLOMBO_METRICS_TOKEN` (at least 16 characters) and scrape with
+`Authorization: Bearer <token>`. Health remains public at `/actuator/health`;
+other actuator endpoints are not exposed.
+
+The scrape includes JVM, process, normalized HTTP, `colombo_build_identity`, active FTP
+sessions, authentication outcomes, upload queues and lifecycle outcomes, S3/CMS
+dependency durations, and credential-refresh/retry outcomes. Domain labels are
+bounded and never contain usernames, assignment IDs, filenames, buckets, URLs,
+or exception text.
+
 For Docker runtime tenant management (no `make` inside container), run:
 
 ```bash
