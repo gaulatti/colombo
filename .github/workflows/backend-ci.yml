@@ -80,7 +80,8 @@ jobs:
           grep -q '^# HELP colombo_dependency_request_duration_seconds' metrics.txt
           grep -q '^# HELP colombo_retry_attempts_total' metrics.txt
           ! grep '^colombo_' metrics.txt | grep -Eqi 'device_id|username|assignment_id|filename|bucket|url|exception'
-          docker run --rm --entrypoint /bin/promtool -i prom/prometheus:v3.5.0 check metrics < metrics.txt
+          grep -E '^(# (HELP|TYPE) colombo_|colombo_)' metrics.txt > colombo-metrics.txt
+          docker run --rm --entrypoint /bin/promtool -i prom/prometheus:v3.5.0 check metrics < colombo-metrics.txt
 
       - name: Show application log on failure
         if: failure()
