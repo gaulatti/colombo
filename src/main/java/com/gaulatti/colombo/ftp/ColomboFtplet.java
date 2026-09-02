@@ -1,6 +1,7 @@
 package com.gaulatti.colombo.ftp;
 
 import com.gaulatti.colombo.model.Tenant;
+import com.gaulatti.colombo.observability.ColomboMetrics;
 import com.gaulatti.colombo.service.UploadService;
 import java.io.File;
 import java.nio.file.Paths;
@@ -38,6 +39,7 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
 
     /** Service delegate for S3 upload and CMS photo-callback operations. */
     private final UploadService uploadService;
+    private final ColomboMetrics metrics;
 
     /**
      * Creates a new {@code ColomboFtplet}.
@@ -47,10 +49,19 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
      */
     public ColomboFtplet(
             ConcurrentHashMap<String, SessionData> sessions,
-            UploadService uploadService
+            UploadService uploadService,
+            ColomboMetrics metrics
     ) {
         this.sessions = sessions;
         this.uploadService = uploadService;
+        this.metrics = metrics;
+    }
+
+    public ColomboFtplet(
+            ConcurrentHashMap<String, SessionData> sessions,
+            UploadService uploadService
+    ) {
+        this(sessions, uploadService, ColomboMetrics.noop());
     }
 
     /**
@@ -80,6 +91,7 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
      */
     @Override
     public FtpletResult onConnect(FtpSession session) {
+        metrics.ftpConnection("connect");
         log.info("[CONNECT] sessionId='{}' remoteAddress='{}'",
                 session.getSessionId(), session.getClientAddress());
         return FtpletResult.DEFAULT;
@@ -93,6 +105,7 @@ public class ColomboFtplet extends DefaultFtplet implements Ftplet {
      */
     @Override
     public FtpletResult onDisconnect(FtpSession session) {
+        metrics.ftpConnection("disconnect");
         String username = extractUsername(session);
         log.info("[DISCONNECT] sessionId='{}' username='{}' remoteAddress='{}'",
                 session.getSessionId(), username, session.getClientAddress());

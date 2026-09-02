@@ -16,6 +16,8 @@ RUN chmod +x /usr/local/bin/tenants-cli
 ARG PORT=8080
 ARG COLOMBO_FTP_PORT=21
 ARG COLOMBO_FTP_PASSIVE_PORTS=60000-60100
+ARG COLOMBO_BUILD_VERSION=development
+ENV COLOMBO_BUILD_VERSION=${COLOMBO_BUILD_VERSION}
 
 # HTTP / actuator (override at build time with --build-arg PORT=...)
 EXPOSE ${PORT}

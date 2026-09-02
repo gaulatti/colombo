@@ -4,6 +4,7 @@ import com.gaulatti.colombo.ftp.ColomboFtplet;
 import com.gaulatti.colombo.ftp.ColomboUserManager;
 import com.gaulatti.colombo.ftp.SessionData;
 import com.gaulatti.colombo.repository.TenantRepository;
+import com.gaulatti.colombo.observability.ColomboMetrics;
 import com.gaulatti.colombo.service.UploadService;
 import java.util.HashMap;
 import java.util.Map;
@@ -18,6 +19,7 @@ import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -45,6 +47,7 @@ public class FtpServerConfig implements DisposableBean {
      * HTTP client for outbound calls to the CMS.
      */
     private final RestTemplate restTemplate;
+    private final ColomboMetrics metrics;
 
     /** 
      * Reference to the running FTP server, kept for lifecycle management.
@@ -57,12 +60,19 @@ public class FtpServerConfig implements DisposableBean {
      * @param tenantRepository repository for resolving tenant records
      * @param restTemplate     HTTP client used by child beans
      */
+    @Autowired
     public FtpServerConfig(
             TenantRepository tenantRepository,
-            RestTemplate restTemplate
+            RestTemplate restTemplate,
+            ColomboMetrics metrics
     ) {
         this.tenantRepository = tenantRepository;
         this.restTemplate = restTemplate;
+        this.metrics = metrics;
+    }
+
+    public FtpServerConfig(TenantRepository tenantRepository, RestTemplate restTemplate) {
+        this(tenantRepository, restTemplate, ColomboMetrics.noop());
     }
 
     /**
@@ -73,7 +83,9 @@ public class FtpServerConfig implements DisposableBean {
      */
     @Bean
     public ConcurrentHashMap<String, SessionData> sessions() {
-        return new ConcurrentHashMap<>();
+        ConcurrentHashMap<String, SessionData> sessions = new ConcurrentHashMap<>();
+        metrics.registerSessions(sessions);
+        return sessions;
     }
 
     /**
@@ -91,7 +103,13 @@ public class FtpServerConfig implements DisposableBean {
             ConcurrentHashMap<String, SessionData> sessions,
             @Value("${COLOMBO_MASTER_PASSWORD:${COLOMBO_DEV_PASSWORD:}}") String configuredMasterPassword
     ) {
-        return new ColomboUserManager(tenantRepository, restTemplate, sessions, configuredMasterPassword);
+        return new ColomboUserManager(
+                tenantRepository,
+                restTemplate,
+                sessions,
+                configuredMasterPassword,
+                metrics
+        );
     }
 
     /**
@@ -107,7 +125,7 @@ public class FtpServerConfig implements DisposableBean {
             ConcurrentHashMap<String, SessionData> sessions,
             UploadService uploadService
     ) {
-        return new ColomboFtplet(sessions, uploadService);
+        return new ColomboFtplet(sessions, uploadService, metrics);
     }
 
     /**
