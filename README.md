@@ -83,7 +83,7 @@ Useful commands:
 | `make package` | Build the release binary |
 | `make tenants` | Open the tenant CRUD CLI |
 
-Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](wiki/Home.md).
+Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](https://github.com/gaulatti/colombo/wiki).
 
 ## Java versus Rust benchmark
 
