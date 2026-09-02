@@ -2,105 +2,88 @@
 
 [![codecov](https://codecov.io/gh/gaulatti/colombo/branch/main/graph/badge.svg)](https://codecov.io/gh/gaulatti/colombo)
 
-A **multi-tenant FTP server** that authenticates users via CMS-issued credentials, uploads files to Amazon S3, and notifies the CMS via a photo-callback webhook. No long-lived AWS keys are stored — every session is credential-less until the CMS grants it.
+Colombo is a single-process Rust upload gateway. It accepts FTP/explicit FTPS and HTTP uploads, validates tenant credentials with the tenant CMS, delivers accepted files to Amazon S3, and notifies the CMS asynchronously.
 
-Built with Spring Boot 4 · Apache FTP Server · AWS SDK for Java v2 · PostgreSQL + Flyway.
+The previous Java implementation is preserved on the `archive/v1-java` branch.
 
----
+## Runtime contract
 
-## How it works
+1. Resolve the FTP username in PostgreSQL.
+2. POST the supplied credential to that tenant's validation endpoint.
+3. Receive an assignment ID and short-lived S3 credentials.
+4. Accept the file onto local storage.
+5. Return FTP `226` or HTTP `202` immediately after local acceptance.
+6. Upload to S3 and then POST the photo callback in the background.
 
-1. A tenant FTP client connects and sends its username and password.
-2. Colombo posts the password to the tenant's CMS **validation endpoint**.
-3. The CMS returns a short-lived STS credential set + an assignment ID.
-4. The client uploads a file via `STOR`.
-5. Colombo writes the file to the CMS-specified S3 bucket/prefix.
-6. Colombo calls the CMS **photo-callback endpoint** with the S3 URL.
+FTP files remain in the shared temporary FTP filesystem, matching v1. HTTP temporary files are deleted after the S3 attempt. Each FTP connection has isolated session credentials, including when one username is connected concurrently.
 
----
+## Local start
 
-## Quick Start
-
-```bash
-# Clone and enter the project
-git clone <repo-url>
-cd colombo
-
-# Set up environment
-cp .env.example .env   # fill in DATABASE_URL, COLOMBO_MASTER_PASSWORD, etc.
-
-# Start the dev session (requires tmux)
-make dev
-
-# Or run directly
-make run
-```
-
-FTP server starts on **port 2121** in development. HTTP/actuator on **port 8080**.
-
-Prometheus metrics are exposed privately at `GET /actuator/prometheus`. Set a
-dedicated `COLOMBO_METRICS_TOKEN` (at least 16 characters) and scrape with
-`Authorization: Bearer <token>`. Health remains public at `/actuator/health`;
-other actuator endpoints are not exposed.
-
-The scrape includes JVM, process, normalized HTTP, `colombo_build_identity`, active FTP
-sessions, authentication outcomes, upload queues and lifecycle outcomes, S3/CMS
-dependency durations, and credential-refresh/retry outcomes. Domain labels are
-bounded and never contain usernames, assignment IDs, filenames, buckets, URLs,
-or exception text.
-
-For Docker runtime tenant management (no `make` inside container), run:
+Rust 1.94.1 or newer and PostgreSQL are required for host development. Docker is the reproducible integration path.
 
 ```bash
-docker exec -it colombo-backend tenants-cli
+cp .env.example .env
+cargo run
 ```
 
----
+Or start the complete disposable local stack:
 
-## Make Targets
+```bash
+docker compose up --build --wait
+docker compose exec colombo tenants-cli
+```
 
-| Target              | Description                          |
-| ------------------- | ------------------------------------ |
-| `make dev`          | Start tmux dev session               |
-| `make run`          | Run app in current terminal          |
-| `make test`         | Run test suite                       |
-| `make verify`       | Run tests + coverage checks          |
-| `make coverage`     | Generate JaCoCo HTML/XML coverage    |
-| `make build`        | Compile (skip tests)                 |
-| `make package`      | Build runnable JAR                   |
-| `make tenants`      | Interactive tenant CRUD CLI          |
-| `make docker-build` | Build Docker image (`colombo:local`) |
-| `make docker-run`   | Run Docker image with `.env`         |
+The default ports are HTTP `8080`, FTP/explicit FTPS `2121`, and passive FTP `60000-60010` in Compose. PostgreSQL and mock CMS/S3 dependencies are local-only; the deployable application remains one Colombo container.
 
----
+## HTTP upload
 
-## Documentation
+```bash
+curl -X POST http://localhost:8080/upload \
+  -H 'X-Colombo-Username: photographer' \
+  -H 'X-Colombo-Password: cms-credential' \
+  -F file=@photo.jpg
+```
 
-Full documentation is in the [wiki](wiki/Home.md):
+Successful local acceptance returns:
 
-| Page                                           | Contents                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------- |
-| [Architecture](wiki/Architecture.md)           | System overview, component descriptions, upload flow          |
-| [Configuration](wiki/Configuration.md)         | All environment variables and `application.properties`        |
-| [Development](wiki/Development.md)             | Local setup, dev workflow, build commands                     |
-| [Deployment](wiki/Deployment.md)               | Docker, GitHub Actions CI/CD, production checklist            |
-| [Tenant Management](wiki/Tenant-Management.md) | Schema, CLI tool, API key rotation                            |
-| [CMS Integration](wiki/CMS-Integration.md)     | Validation endpoint, photo-callback contract, master password |
+```json
+{"status":"accepted","assignment_id":"..."}
+```
 
----
+The multipart request limit is 100 MiB. The FTP-only master-password support bypass is never accepted by this endpoint.
 
-## Coverage
+## FTPS
 
-- Codecov uploads from GitHub Actions on `main`
-- Branch used for badge/report: `main`
-- Local coverage report: `coverage/index.html` (after `make coverage`)
-- Raw JaCoCo output: `target/site/jacoco/index.html` (after `./mvnw verify`)
+Plain FTP remains available. To additionally enable explicit FTPS on the same control port, mount a PEM certificate chain and private key read-only and set:
 
----
+```dotenv
+COLOMBO_FTPS_CERTIFICATE_PATH=/etc/letsencrypt/live/colombo.gaulatti.com/fullchain.pem
+COLOMBO_FTPS_PRIVATE_KEY_PATH=/etc/letsencrypt/live/colombo.gaulatti.com/privkey.pem
+```
 
-## Requirements
+For `colombo.gaulatti.com`, obtain and renew the certificate on the host with Let's Encrypt DNS-01, then mount `/etc/letsencrypt` read-only into the container. Setting only one path fails startup.
 
-- Java 21+
-- PostgreSQL 14+
-- tmux (for `make dev`)
-- Docker (optional)
+## Operations
+
+- `GET /actuator/health` is public and checks PostgreSQL.
+- `GET /actuator/prometheus` requires `Authorization: Bearer $COLOMBO_METRICS_TOKEN`; without a configured token it remains inaccessible.
+- A configured `COLOMBO_METRICS_TOKEN` must be at least 16 characters.
+- Other routes retain the v1 protected response behavior (`401`).
+- `tenants-cli` remains installed in the runtime container.
+
+Useful commands:
+
+| Command | Purpose |
+| --- | --- |
+| `make run` | Run the Rust process |
+| `make test` | Run unit tests |
+| `make verify` | Check formatting, tests, and strict Clippy |
+| `make integration` | Exercise PostgreSQL, HTTP, FTP, FTPS, S3, and callbacks through Docker |
+| `make package` | Build the release binary |
+| `make tenants` | Open the tenant CRUD CLI |
+
+Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](wiki/Home.md).
+
+## Java versus Rust benchmark
+
+Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 203 ms versus 10.3 s to become healthy, 1.23 MiB versus 232.8 MiB idle memory, 26.66x the HTTP root throughput, and 5.30x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.

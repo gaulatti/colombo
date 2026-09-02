@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: colombo
+      POSTGRES_USER: colombo
+      POSTGRES_PASSWORD: colombo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U colombo -d colombo"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - colombo-postgres:/var/lib/postgresql/data
+
+  mocks:
+    image: python:3.13-alpine
+    command: ["python", "/fixtures/mock_services.py"]
+    volumes:
+      - ./tests/mock_services.py:/fixtures/mock_services.py:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:18080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  colombo:
+    build: .
+    environment:
+      PORT: "8080"
+      COLOMBO_FTP_PORT: "2121"
+      COLOMBO_FTP_PASSIVE_PORTS: "60000-60010"
+      COLOMBO_FTP_PASSIVE_EXTERNAL_ADDRESS: "127.0.0.1"
+      COLOMBO_METRICS_TOKEN: "local-metrics-token"
+      DATABASE_URL: "jdbc:postgresql://postgres:5432/colombo"
+      DATABASE_USER: "colombo"
+      DATABASE_PASSWORD: "colombo"
+      AWS_ENDPOINT_URL_S3: "http://mocks:19000"
+      AWS_EC2_METADATA_DISABLED: "true"
+      COLOMBO_FTPS_CERTIFICATE_PATH: "${COLOMBO_FTPS_CERTIFICATE_PATH:-}"
+      COLOMBO_FTPS_PRIVATE_KEY_PATH: "${COLOMBO_FTPS_PRIVATE_KEY_PATH:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mocks:
+        condition: service_healthy
+    ports:
+      - "${COLOMBO_HTTP_HOST_PORT:-8080}:8080"
+      - "${COLOMBO_FTP_HOST_PORT:-2121}:2121"
+      - "60000-60010:60000-60010"
+    volumes:
+      - "${COLOMBO_TEST_CERT_DIR:-./tests/empty-certs}:/certs:ro"
+
+volumes:
+  colombo-postgres:

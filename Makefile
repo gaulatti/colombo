@@ -3,9 +3,9 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 SESSION_NAME ?= colombo-dev
-MVNW := ./mvnw
+CARGO := cargo
 
-.PHONY: help dev dev-attach dev-stop tenants run build test verify coverage clean package docker-build docker-run
+.PHONY: help dev dev-attach dev-stop tenants run build test verify integration clean package docker-build docker-run
 
 help:
 	@echo "Colombo CLI"
@@ -20,9 +20,9 @@ help:
 	@echo "  make run          Run app in current terminal"
 	@echo "  make build        Compile project (skip tests)"
 	@echo "  make test         Run tests"
-	@echo "  make verify       Run tests + coverage checks"
-	@echo "  make coverage     Generate HTML/XML coverage reports"
-	@echo "  make package      Build jar (skip tests)"
+	@echo "  make verify       Run format, tests, and Clippy"
+	@echo "  make integration  Exercise the Docker/FTP/HTTP boundary"
+	@echo "  make package      Build optimized native binary"
 	@echo "  make clean        Clean build outputs"
 	@echo "  make docker-build Build Docker image (tag: colombo:local)"
 	@echo "  make docker-run   Run Docker image (port 8080)"
@@ -40,32 +40,30 @@ tenants:
 	@./scripts/tenants-cli.sh
 
 run:
-	@$(MVNW) spring-boot:run
+	@$(CARGO) run
 
 build:
-	@$(MVNW) -DskipTests compile
+	@$(CARGO) build
 
 test:
-	@$(MVNW) test
+	@$(CARGO) test --locked
 
 verify:
-	@$(MVNW) verify
+	@$(CARGO) fmt --all -- --check
+	@$(CARGO) test --locked
+	@$(CARGO) clippy --all-targets --all-features -- -D warnings
 
-coverage:
-	@$(MVNW) clean verify
-	@rm -rf coverage
-	@mkdir -p coverage
-	@cp -R target/site/jacoco/. coverage/
-	@echo "Coverage HTML: coverage/index.html"
+integration:
+	@./tests/e2e.sh
 
 package:
-	@$(MVNW) -DskipTests package
+	@$(CARGO) build --locked --release
 
 clean:
-	@$(MVNW) clean
+	@$(CARGO) clean
 
 docker-build:
 	@docker build -t colombo:local .
 
 docker-run:
-	@docker run --rm -p 8080:8080 --env-file .env colombo:local
+	@docker run --rm -p 8080:8080 -p 2121:2121 -p 60000-60100:60000-60100 --env-file .env colombo:local

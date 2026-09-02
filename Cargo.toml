@@ -1,0 +1,49 @@
+[package]
+name = "colombo"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.94.1"
+description = "FTP and HTTP upload gateway for tenant CMS and S3"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+aws-config = "=1.11.0"
+aws-credential-types = "=1.3.0"
+aws-sdk-s3 = "=1.144.0"
+axum = { version = "=0.8.9", features = ["multipart", "macros"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+chrono-tz = "0.10.4"
+dashmap = "6.1.0"
+dotenvy = "0.15.7"
+kamadak-exif = "0.6.1"
+libunftp = { version = "=0.23.0", features = ["prometheus"] }
+mime_guess = "2.0.5"
+prometheus = "0.14.0"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "migrate", "macros"] }
+subtle = "2.6.1"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-util = { version = "0.7.17", features = ["io"] }
+tower-http = { version = "0.6.6", features = ["catch-panic", "limit", "trace"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
+unftp-core = "=0.1.0"
+unftp-sbe-fs = "=0.4.0"
+url = "2.5.7"
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[dev-dependencies]
+assert-json-diff = "2.0.2"
+http-body-util = "0.1.3"
+tower = { version = "0.5.2", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,10 +1,11 @@
 .git
-.gitignore
+.github
 .idea
-.vscode
+.agents
+wiki
 target
-.mvn/wrapper/maven-wrapper.jar
-*.iml
+coverage
 .env
-.env.*
-!.env.example
+benchmarks
+tests
+*.md

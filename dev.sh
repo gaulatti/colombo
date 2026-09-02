@@ -19,7 +19,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
-BACKEND_CMD="cd \"$ROOT_DIR\" && ./mvnw spring-boot:run; code=\$?; echo; echo \"[backend stopped] shutting down tmux session...\"; tmux kill-session -t \"$SESSION_NAME\" >/dev/null 2>&1 || true; exit \$code"
+BACKEND_CMD="cd \"$ROOT_DIR\" && cargo run; code=\$?; echo; echo \"[backend stopped] shutting down tmux session...\"; tmux kill-session -t \"$SESSION_NAME\" >/dev/null 2>&1 || true; exit \$code"
 
 # Left pane: backend app. Right pane: interactive shell for git/logs/curl/etc.
 tmux new-session -d -s "$SESSION_NAME" -n "dev" -c "$ROOT_DIR" "bash -lc '$BACKEND_CMD'"
