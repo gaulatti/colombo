@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -37,36 +36,46 @@ impl CmsClient {
         &self,
         tenant: &Tenant,
         password: &str,
+        operation: &'static str,
     ) -> Result<SessionData, ValidationError> {
         let start = Instant::now();
-        let response = self
+        let response = match self
             .client
             .post(&tenant.validation_endpoint)
             .header("X-Colombo-API-Key", &tenant.api_key)
             .json(&serde_json::json!({"key": password}))
             .send()
             .await
-            .map_err(|e| ValidationError::Unavailable(e.into()))?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.observe("cms", operation, "unavailable", start);
+                return Err(ValidationError::Unavailable(error.into()));
+            }
+        };
         let status = response.status();
-        self.metrics
-            .dependency_duration
-            .with_label_values(&["cms", "validate", class(status)])
-            .observe(start.elapsed().as_secs_f64());
         if status.is_client_error() {
+            self.observe("cms", operation, "denied", start);
             return Err(ValidationError::Denied);
         }
         if !status.is_success() {
+            self.observe("cms", operation, "unavailable", start);
             return Err(ValidationError::Unavailable(anyhow!(
                 "CMS validation returned {status}"
             )));
         }
-        let parsed: ValidationResponse = response
-            .json()
-            .await
-            .map_err(|e| ValidationError::Unavailable(e.into()))?;
+        let parsed: ValidationResponse = match response.json().await {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.observe("cms", operation, "unavailable", start);
+                return Err(ValidationError::Unavailable(error.into()));
+            }
+        };
         if parsed.assignment_id.trim().is_empty() || !parsed.upload.valid() {
+            self.observe("cms", operation, "denied", start);
             return Err(ValidationError::Denied);
         }
+        self.observe("cms", operation, "success", start);
         Ok(SessionData {
             tenant: tenant.clone(),
             assignment_id: parsed.assignment_id,
@@ -96,7 +105,15 @@ impl CmsClient {
         let status = response.status();
         self.metrics
             .dependency_duration
-            .with_label_values(&["cms", "sequence", class(status)])
+            .with_label_values(&[
+                "cms",
+                "sequence",
+                if status.is_success() {
+                    "success"
+                } else {
+                    "error"
+                },
+            ])
             .observe(start.elapsed().as_secs_f64());
         if !status.is_success() {
             bail!("CMS sequence returned {status}");
@@ -131,7 +148,7 @@ impl CmsClient {
             target_filename: &'a str,
         }
         let start = Instant::now();
-        let response = self
+        let response = match self
             .client
             .post(&session.tenant.photo_endpoint)
             .header("X-Colombo-API-Key", &session.tenant.api_key)
@@ -142,19 +159,38 @@ impl CmsClient {
                 target_filename: target,
             })
             .send()
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.observe("cms", "photo_callback", "error", start);
+                return Err(error.into());
+            }
+        };
         let status = response.status();
-        self.metrics
-            .dependency_duration
-            .with_label_values(&["cms", "callback", class(status)])
-            .observe(start.elapsed().as_secs_f64());
         if status.is_success() {
+            self.observe("cms", "photo_callback", "success", start);
             Ok(CallbackOutcome::Accepted)
         } else if status.is_client_error() {
+            self.observe("cms", "photo_callback", "denied", start);
             Ok(CallbackOutcome::Denied)
         } else {
+            self.observe("cms", "photo_callback", "error", start);
             bail!("CMS callback returned {status}")
         }
+    }
+
+    fn observe(
+        &self,
+        dependency: &'static str,
+        operation: &'static str,
+        result: &'static str,
+        start: Instant,
+    ) {
+        self.metrics
+            .dependency_duration
+            .with_label_values(&[dependency, operation, result])
+            .observe(start.elapsed().as_secs_f64());
     }
 }
 
@@ -162,14 +198,4 @@ impl CmsClient {
 pub enum CallbackOutcome {
     Accepted,
     Denied,
-}
-
-fn class(status: StatusCode) -> &'static str {
-    if status.is_success() {
-        "success"
-    } else if status.is_client_error() {
-        "client_error"
-    } else {
-        "server_error"
-    }
 }

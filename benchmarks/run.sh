@@ -33,6 +33,7 @@ for runtime in java rust; do
     -e COLOMBO_FTP_PASSIVE_EXTERNAL_ADDRESS=127.0.0.1 \
     -e DATABASE_URL=jdbc:postgresql://colombo-benchmark-postgres:5432/colombo \
     -e DATABASE_USER=colombo -e DATABASE_PASSWORD=colombo -e FLYWAY_ENABLED=true \
+    -e COLOMBO_METRICS_TOKEN=benchmark-metrics-token \
     "$image" >/dev/null
   ready=false
   for _ in $(seq 1 1200); do

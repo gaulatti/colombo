@@ -7,11 +7,11 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use aws_credential_types::{Credentials, provider::SharedCredentialsProvider};
 use aws_sdk_s3::{Client, error::ProvideErrorMetadata, primitives::ByteStream};
 use chrono::Utc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{error, info};
 
 use crate::{
@@ -57,6 +57,20 @@ pub struct UploadService {
     callback_slots: Arc<Semaphore>,
 }
 
+struct ActiveS3Work {
+    _permit: OwnedSemaphorePermit,
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for ActiveS3Work {
+    fn drop(&mut self) {
+        self.metrics
+            .upload_active
+            .with_label_values(&["s3_upload"])
+            .dec();
+    }
+}
+
 impl std::fmt::Debug for UploadService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UploadService").finish_non_exhaustive()
@@ -81,16 +95,25 @@ impl UploadService {
     ) {
         let service = Arc::clone(self);
         self.metrics
+            .upload_events
+            .with_label_values(&["ftp", "accepted", "queued"])
+            .inc();
+        self.metrics
             .upload_queue_depth
-            .with_label_values(&["s3"])
+            .with_label_values(&["s3_upload"])
             .inc();
         tokio::spawn(async move {
+            let result = service.process_ftp(session, original, path).await;
             service
                 .metrics
-                .upload_queue_depth
-                .with_label_values(&["s3"])
-                .dec();
-            if let Err(err) = service.process_ftp(session, original, path).await {
+                .upload_events
+                .with_label_values(&[
+                    "ftp",
+                    "complete",
+                    if result.is_ok() { "success" } else { "failure" },
+                ])
+                .inc();
+            if let Err(err) = result {
                 error!(error = %err, "FTP background upload failed");
             }
         });
@@ -99,29 +122,33 @@ impl UploadService {
     pub fn queue_http(self: &Arc<Self>, session: SessionData, original: String, path: PathBuf) {
         let service = Arc::clone(self);
         self.metrics
+            .upload_events
+            .with_label_values(&["http", "accepted", "queued"])
+            .inc();
+        self.metrics
             .upload_queue_depth
-            .with_label_values(&["s3"])
+            .with_label_values(&["s3_upload"])
             .inc();
         tokio::spawn(async move {
+            let result: Result<()> = async {
+                let active = service.begin_s3_work().await;
+                let upload = service.process_once(&session, &original, &path).await?;
+                drop(active);
+                service.callback(&session, &original, &upload, None).await
+            }
+            .await;
+            let _ = tokio::fs::remove_file(&path).await;
             service
                 .metrics
-                .upload_queue_depth
-                .with_label_values(&["s3"])
-                .dec();
-            let result = service
-                .process_once("http", &session, &original, &path)
-                .await;
-            let _ = tokio::fs::remove_file(&path).await;
-            match result {
-                Ok(upload) => {
-                    if let Err(err) = service
-                        .callback("http", &session, &original, &upload, None)
-                        .await
-                    {
-                        error!(error = %err, "HTTP callback failed");
-                    }
-                }
-                Err(err) => error!(error = %err, "HTTP background upload failed"),
+                .upload_events
+                .with_label_values(&[
+                    "http",
+                    "complete",
+                    if result.is_ok() { "success" } else { "failure" },
+                ])
+                .inc();
+            if let Err(err) = result {
+                error!(error = %err, "HTTP background upload or callback failed");
             }
         });
     }
@@ -132,33 +159,54 @@ impl UploadService {
         original: String,
         path: PathBuf,
     ) -> Result<()> {
+        let active = self.begin_s3_work().await;
         if !handle.is_valid() {
             bail!("FTP session was evicted");
         }
         let session = handle.snapshot().await;
-        let upload = match self.process_once("ftp", &session, &original, &path).await {
+        let upload = match self.process_once(&session, &original, &path).await {
             Ok(result) => result,
             Err(UploadFailure::Expired) => {
                 self.metrics
                     .retry_attempts
-                    .with_label_values(&["expired_credentials", "attempted"])
+                    .with_label_values(&["s3_put", "started"])
                     .inc();
-                let key = session
-                    .validation_key
-                    .as_deref()
-                    .context("session has no validation key")?;
-                match self.cms.validate(&session.tenant, key).await {
+                let Some(key) = session.validation_key.as_deref() else {
+                    self.metrics
+                        .retry_attempts
+                        .with_label_values(&["credential_refresh", "denied"])
+                        .inc();
+                    self.metrics
+                        .retry_attempts
+                        .with_label_values(&["s3_put", "abandoned"])
+                        .inc();
+                    handle.invalidate();
+                    bail!("session has no validation key");
+                };
+                match self
+                    .cms
+                    .validate(&session.tenant, key, "validation_refresh")
+                    .await
+                {
                     Ok(fresh) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "success"])
+                            .inc();
                         handle.replace(fresh.clone()).await;
-                        match self.process_once("ftp", &fresh, &original, &path).await {
+                        match self.process_once(&fresh, &original, &path).await {
                             Ok(result) => {
                                 self.metrics
                                     .retry_attempts
-                                    .with_label_values(&["expired_credentials", "success"])
+                                    .with_label_values(&["s3_put", "success"])
                                     .inc();
                                 result
                             }
                             Err(err) => {
+                                self.metrics
+                                    .retry_attempts
+                                    .with_label_values(&["s3_put", "failure"])
+                                    .inc();
                                 if matches!(err, UploadFailure::Expired | UploadFailure::Denied) {
                                     handle.invalidate();
                                 }
@@ -167,10 +215,26 @@ impl UploadService {
                         }
                     }
                     Err(ValidationError::Denied) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "denied"])
+                            .inc();
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["s3_put", "abandoned"])
+                            .inc();
                         handle.invalidate();
                         bail!("CMS denied credential refresh");
                     }
                     Err(err) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "unavailable"])
+                            .inc();
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["s3_put", "abandoned"])
+                            .inc();
                         handle.invalidate();
                         return Err(err.into());
                     }
@@ -182,14 +246,35 @@ impl UploadService {
             }
             Err(err) => return Err(err.into()),
         };
+        drop(active);
         let active = handle.snapshot().await;
-        self.callback("ftp", &active, &original, &upload, Some(&handle))
+        self.callback(&active, &original, &upload, Some(&handle))
             .await
+    }
+
+    async fn begin_s3_work(&self) -> ActiveS3Work {
+        let permit = self
+            .s3_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("S3 semaphore remains open while the service is alive");
+        self.metrics
+            .upload_queue_depth
+            .with_label_values(&["s3_upload"])
+            .dec();
+        self.metrics
+            .upload_active
+            .with_label_values(&["s3_upload"])
+            .inc();
+        ActiveS3Work {
+            _permit: permit,
+            metrics: self.metrics.clone(),
+        }
     }
 
     async fn process_once(
         &self,
-        protocol: &'static str,
         session: &SessionData,
         original: &str,
         path: &Path,
@@ -229,28 +314,18 @@ impl UploadService {
         } else {
             format!("{}/{}", credentials.key_prefix, target)
         };
-        let _permit = self
-            .s3_slots
-            .acquire()
-            .await
-            .map_err(|e| UploadFailure::Other(e.into()))?;
-        self.metrics.upload_active.with_label_values(&["s3"]).inc();
-        self.metrics
-            .upload_events
-            .with_label_values(&[protocol, "s3", "started"])
-            .inc();
         let started = Instant::now();
         let result = put_s3(credentials, original, path, &key).await;
-        self.metrics.upload_active.with_label_values(&["s3"]).dec();
-        let label = if result.is_ok() { "success" } else { "failure" };
+        let label = match &result {
+            Ok(()) => "success",
+            Err(UploadFailure::Expired) => "expired",
+            Err(UploadFailure::Denied) => "denied",
+            Err(UploadFailure::Other(_)) => "error",
+        };
         self.metrics
             .dependency_duration
-            .with_label_values(&["s3", "put", label])
+            .with_label_values(&["s3", "put_object", label])
             .observe(started.elapsed().as_secs_f64());
-        self.metrics
-            .upload_events
-            .with_label_values(&[protocol, "s3", label])
-            .inc();
         result?;
         info!(assignment_id = %session.assignment_id, "S3 upload complete");
         Ok(Uploaded {
@@ -261,7 +336,6 @@ impl UploadService {
 
     async fn callback(
         &self,
-        protocol: &'static str,
         session: &SessionData,
         original: &str,
         upload: &Uploaded,
@@ -269,16 +343,16 @@ impl UploadService {
     ) -> Result<()> {
         self.metrics
             .upload_queue_depth
-            .with_label_values(&["callback"])
+            .with_label_values(&["cms_callback"])
             .inc();
         let _permit = self.callback_slots.acquire().await?;
         self.metrics
             .upload_queue_depth
-            .with_label_values(&["callback"])
+            .with_label_values(&["cms_callback"])
             .dec();
         self.metrics
             .upload_active
-            .with_label_values(&["callback"])
+            .with_label_values(&["cms_callback"])
             .inc();
         let result = self
             .cms
@@ -286,24 +360,14 @@ impl UploadService {
             .await;
         self.metrics
             .upload_active
-            .with_label_values(&["callback"])
+            .with_label_values(&["cms_callback"])
             .dec();
         match result? {
-            CallbackOutcome::Accepted => {
-                self.metrics
-                    .upload_events
-                    .with_label_values(&[protocol, "callback", "success"])
-                    .inc();
-                Ok(())
-            }
+            CallbackOutcome::Accepted => Ok(()),
             CallbackOutcome::Denied => {
                 if let Some(handle) = handle {
                     handle.invalidate();
                 }
-                self.metrics
-                    .upload_events
-                    .with_label_values(&[protocol, "callback", "denied"])
-                    .inc();
                 bail!("CMS denied photo callback")
             }
         }

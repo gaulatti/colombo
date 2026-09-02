@@ -109,12 +109,16 @@ async fn upload(
             return error(StatusCode::INTERNAL_SERVER_ERROR, "Tenant lookup failed");
         }
     };
-    let session = match state.cms.validate(&tenant, &password).await {
+    let session = match state
+        .cms
+        .validate(&tenant, &password, "validation_upload")
+        .await
+    {
         Ok(value) => {
             state
                 .metrics
                 .authentication_attempts
-                .with_label_values(&["http", "success"])
+                .with_label_values(&["http_upload", "success"])
                 .inc();
             value
         }
@@ -122,7 +126,7 @@ async fn upload(
             state
                 .metrics
                 .authentication_attempts
-                .with_label_values(&["http", "denied"])
+                .with_label_values(&["http_upload", "denied"])
                 .inc();
             return error(StatusCode::UNAUTHORIZED, "Invalid credentials");
         }
@@ -130,7 +134,7 @@ async fn upload(
             state
                 .metrics
                 .authentication_attempts
-                .with_label_values(&["http", "error"])
+                .with_label_values(&["http_upload", "unavailable"])
                 .inc();
             tracing::warn!(error = %err, "HTTP upload authentication failed");
             return error(StatusCode::UNAUTHORIZED, "Invalid credentials");

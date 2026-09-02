@@ -53,13 +53,10 @@ struct SessionLease {
 }
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        self.metrics
-            .ftp_sessions
-            .with_label_values(&["authenticated"])
-            .dec();
+        self.metrics.ftp_sessions.dec();
         self.metrics
             .ftp_connection_events
-            .with_label_values(&["logout"])
+            .with_label_values(&["disconnect"])
             .inc();
     }
 }
@@ -85,19 +82,42 @@ impl Authenticator for FtpAuth {
         username: &str,
         creds: &Credentials,
     ) -> Result<Principal, AuthenticationError> {
-        let password = creds
-            .password
-            .as_deref()
-            .ok_or(AuthenticationError::BadPassword)?;
-        let tenant = db::tenant_by_username(&self.pool, username)
-            .await
-            .map_err(|_| AuthenticationError::new("tenant lookup failed"))?
-            .ok_or(AuthenticationError::BadUser)?;
+        let password = match creds.password.as_deref() {
+            Some(password) => password,
+            None => {
+                self.metrics
+                    .authentication_attempts
+                    .with_label_values(&["ftp", "unsupported"])
+                    .inc();
+                return Err(AuthenticationError::BadPassword);
+            }
+        };
+        let tenant = match db::tenant_by_username(&self.pool, username).await {
+            Ok(Some(tenant)) => tenant,
+            Ok(None) => {
+                self.metrics
+                    .authentication_attempts
+                    .with_label_values(&["ftp", "unknown_user"])
+                    .inc();
+                return Err(AuthenticationError::BadUser);
+            }
+            Err(_) => {
+                self.metrics
+                    .authentication_attempts
+                    .with_label_values(&["ftp", "unavailable"])
+                    .inc();
+                return Err(AuthenticationError::new("tenant lookup failed"));
+            }
+        };
         let session = if self
             .master_password
             .as_deref()
             .is_some_and(|master| master == password)
         {
+            self.metrics
+                .authentication_attempts
+                .with_label_values(&["ftp", "support_bypass"])
+                .inc();
             tracing::warn!(username, "master-password FTP support bypass used");
             SessionData {
                 tenant,
@@ -106,7 +126,11 @@ impl Authenticator for FtpAuth {
                 validation_key: None,
             }
         } else {
-            match self.cms.validate(&tenant, password).await {
+            match self
+                .cms
+                .validate(&tenant, password, "validation_login")
+                .await
+            {
                 Ok(value) => value,
                 Err(ValidationError::Denied) => {
                     self.metrics
@@ -118,16 +142,18 @@ impl Authenticator for FtpAuth {
                 Err(_) => {
                     self.metrics
                         .authentication_attempts
-                        .with_label_values(&["ftp", "error"])
+                        .with_label_values(&["ftp", "unavailable"])
                         .inc();
                     return Err(AuthenticationError::new("CMS validation failed"));
                 }
             }
         };
-        self.metrics
-            .authentication_attempts
-            .with_label_values(&["ftp", "success"])
-            .inc();
+        if self.master_password.as_deref() != Some(password) {
+            self.metrics
+                .authentication_attempts
+                .with_label_values(&["ftp", "success"])
+                .inc();
+        }
         let token = Uuid::new_v4().to_string();
         let user = ColomboUser {
             username: username.to_owned(),
@@ -163,13 +189,10 @@ impl UserDetailProvider for UserProvider {
                 username: principal.username.clone(),
             }
         })?;
-        self.metrics
-            .ftp_sessions
-            .with_label_values(&["authenticated"])
-            .inc();
+        self.metrics.ftp_sessions.inc();
         self.metrics
             .ftp_connection_events
-            .with_label_values(&["login"])
+            .with_label_values(&["connect"])
             .inc();
         Ok(user)
     }

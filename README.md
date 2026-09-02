@@ -68,6 +68,7 @@ For `colombo.gaulatti.com`, obtain and renew the certificate on the host with Le
 - `GET /actuator/health` is public and checks PostgreSQL.
 - `GET /actuator/prometheus` requires `Authorization: Bearer $COLOMBO_METRICS_TOKEN`; without a configured token it remains inaccessible.
 - A configured `COLOMBO_METRICS_TOKEN` must be at least 16 characters.
+- The scrape preserves the bounded v1 domain families for build identity, FTP sessions and lifecycle, authentication, upload queues/outcomes, CMS/S3 duration, and credential retries. Labels never contain usernames, assignments, filenames, buckets, URLs, or exception text.
 - Other routes retain the v1 protected response behavior (`401`).
 - `tenants-cli` remains installed in the runtime container.
 
@@ -86,4 +87,4 @@ Full architecture, configuration, CMS contracts, deployment, and tenant administ
 
 ## Java versus Rust benchmark
 
-Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 203 ms versus 10.3 s to become healthy, 1.23 MiB versus 232.8 MiB idle memory, 26.66x the HTTP root throughput, and 5.30x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.
+Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 255 ms versus 9.94 s to become healthy, 1.281 MiB versus 235.6 MiB idle memory, 18.41x the HTTP root throughput, and 4.23x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.

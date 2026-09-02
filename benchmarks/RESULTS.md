@@ -6,22 +6,22 @@ Measured on 2026-09-02 with Docker Desktop 29.6.1 on Apple silicon (`arm64`). Ea
 
 | Run | Runtime | Image bytes | Startup to healthy | Idle memory | Idle CPU | HTTP requests/s | FTP connections/s |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | Java v1 | 148,519,531 | 10,306 ms | 232.8 MiB | 0.31% | 377.84 | 750.45 |
-| 1 | Rust v2 | 18,500,106 | 243 ms | 1.230 MiB | 0.00% | 9,390.22 | 3,658.84 |
-| 2 | Java v1 | 148,519,531 | 10,049 ms | 229.5 MiB | 1.25% | 412.57 | 569.14 |
-| 2 | Rust v2 | 18,500,106 | 202 ms | 1.227 MiB | 0.00% | 10,999.45 | 3,391.03 |
-| 3 | Java v1 | 148,519,531 | 10,533 ms | 233.2 MiB | 0.70% | 415.39 | 640.23 |
-| 3 | Rust v2 | 18,500,106 | 203 ms | 1.438 MiB | 0.00% | 11,384.05 | 2,174.39 |
+| 1 | Java v1 | 148,526,310 | 9,755 ms | 266 MiB | 0.17% | 405.66 | 511.80 |
+| 1 | Rust v2 | 18,504,719 | 204 ms | 1.230 MiB | 0.00% | 6,172.88 | 2,877.83 |
+| 2 | Java v1 | 148,526,310 | 9,938 ms | 233.6 MiB | 1.85% | 433.36 | 679.84 |
+| 2 | Rust v2 | 18,504,719 | 264 ms | 1.969 MiB | 0.00% | 9,935.79 | 2,227.32 |
+| 3 | Java v1 | 148,526,310 | 10,423 ms | 235.6 MiB | 0.32% | 615.10 | 754.11 |
+| 3 | Rust v2 | 18,504,719 | 255 ms | 1.281 MiB | 0.00% | 7,976.62 | 3,393.64 |
 
 ## Median comparison
 
 | Metric | Java v1 | Rust v2 | Rust result |
 | --- | ---: | ---: | ---: |
-| Runtime image | 148,519,531 bytes | 18,500,106 bytes | 8.03x smaller |
-| Startup to healthy | 10,306 ms | 203 ms | 50.77x faster |
-| Idle memory | 232.8 MiB | 1.230 MiB | 189.27x lower |
-| Idle CPU | 0.70% | 0.00% | Below `docker stats` reporting resolution |
-| HTTP root throughput | 412.57 requests/s | 10,999.45 requests/s | 26.66x higher |
-| FTP connection churn | 640.23 connections/s | 3,391.03 connections/s | 5.30x higher |
+| Runtime image | 148,526,310 bytes | 18,504,719 bytes | 8.03x smaller |
+| Startup to healthy | 9,938 ms | 255 ms | 38.97x faster |
+| Idle memory | 235.6 MiB | 1.281 MiB | 183.92x lower |
+| Idle CPU | 0.32% | 0.00% | Below `docker stats` reporting resolution |
+| HTTP root throughput | 433.36 requests/s | 7,976.62 requests/s | 18.41x higher |
+| FTP connection churn | 679.84 connections/s | 2,877.83 connections/s | 4.23x higher |
 
-These numbers measure runtime overhead and connection handling, not end-to-end S3 throughput. Production upload latency also depends on the CMS, local disk, network, and Amazon S3. The earlier 400% CPU observation was not reproduced under this one-CPU benchmark: Java's median idle sample was 0.70%, while Rust was below the reporting resolution in all three samples. Run `./benchmarks/run.sh` on the deployment host for hardware-specific capacity planning.
+These numbers measure runtime overhead and connection handling, not end-to-end S3 throughput. Production upload latency also depends on the CMS, local disk, network, and Amazon S3. The earlier 400% CPU observation was not reproduced under this one-CPU benchmark: Java's median idle sample was 0.32%, while Rust was below the reporting resolution in all three samples. Run `./benchmarks/run.sh` on the deployment host for hardware-specific capacity planning.

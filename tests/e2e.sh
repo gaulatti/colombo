@@ -9,6 +9,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
+validate_metrics() {
+  local metrics_file="$cert_dir/metrics.txt"
+  local colombo_metrics_file="$cert_dir/colombo-metrics.txt"
+  curl -fsS -H 'Authorization: Bearer local-metrics-token' \
+    http://127.0.0.1:18081/actuator/prometheus > "$metrics_file"
+  for family in \
+    colombo_build_identity \
+    colombo_ftp_sessions_active \
+    colombo_upload_queue_depth \
+    colombo_upload_queue_active_threads \
+    colombo_authentication_attempts_total \
+    colombo_ftp_connection_events_total \
+    colombo_upload_events_total \
+    colombo_dependency_request_duration_seconds \
+    colombo_retry_attempts_total; do
+    grep -q "^# HELP $family" "$metrics_file"
+  done
+  grep -q 'colombo_build_identity{service="colombo",version="development"}' "$metrics_file"
+  grep -q 'source="http_upload"' "$metrics_file"
+  grep -q 'queue="s3_upload"' "$metrics_file"
+  grep -q 'queue="cms_callback"' "$metrics_file"
+  ! grep '^colombo_' "$metrics_file" | grep -Eqi \
+    '(device_id|username|assignment_id|filename|bucket|url|exception)="'
+  grep -E '^(# (HELP|TYPE) colombo_|colombo_)' "$metrics_file" > "$colombo_metrics_file"
+  docker run --rm --entrypoint /bin/promtool -i prom/prometheus:v3.5.0 \
+    check metrics < "$colombo_metrics_file"
+}
+
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1
 export COLOMBO_TEST_CERT_DIR="$cert_dir"
@@ -26,7 +54,6 @@ echo "$tenant_list" | grep -q photographer
 test "$(curl -fsS http://127.0.0.1:18081/actuator/health)" = '{"status":"UP"}'
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" = 302
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/actuator/prometheus)" = 401
-curl -fsS -H 'Authorization: Bearer local-metrics-token' http://127.0.0.1:18081/actuator/prometheus | grep -q colombo_build_identity
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/private)" = 401
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: unknown' -H 'X-Colombo-Password: secret' -F file=@README.md http://127.0.0.1:18081/upload)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' -F file=@README.md http://127.0.0.1:18081/upload)" = 401
@@ -60,6 +87,7 @@ for _ in $(seq 1 40); do
     echo "$state" | grep -q '"original_filename": "README.md"'
     echo "$state" | grep -q '"target_filename": "demo/readme-0007.md"'
     echo "$state" | grep -q '"original_filename": "ftp.txt"'
+    validate_metrics
     exit 0
   fi
   sleep 0.25
