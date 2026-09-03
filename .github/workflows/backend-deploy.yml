@@ -8,6 +8,7 @@ on:
       - 'migrations/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'vendor/**'
       - 'Dockerfile'
       - '.dockerignore'
       - 'compose.yaml'
