@@ -50,6 +50,9 @@ docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d c
   "INSERT INTO tenants (name, ftp_username, api_key, validation_endpoint, photo_endpoint) VALUES ('Test tenant', 'photographer', 'tenant-api-key', 'http://mocks:18080/validate', 'http://mocks:18080/photo')"
 tenant_list="$(printf '1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
 echo "$tenant_list" | grep -q photographer
+tenant_view="$(printf '2\n1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
+echo "$tenant_view" | grep -q '\[configured\]'
+! echo "$tenant_view" | grep -q 'tenant-api-key'
 
 test "$(curl -fsS http://127.0.0.1:18081/actuator/health)" = '{"status":"UP"}'
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" = 302

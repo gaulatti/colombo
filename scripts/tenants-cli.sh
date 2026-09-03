@@ -142,7 +142,7 @@ view_tenant() {
       id,
       name,
       ftp_username,
-      api_key,
+      CASE WHEN api_key IS NULL OR api_key = '' THEN '[missing]' ELSE '[configured]' END AS api_key,
       validation_endpoint,
       photo_endpoint
     FROM tenants
@@ -210,7 +210,7 @@ update_tenant() {
   IFS=$'\t' read -r cur_name cur_ftp_username cur_api_key cur_validation_endpoint cur_photo_endpoint <<< "$row"
 
   echo "Update tenant id=$id (press Enter to keep current value)"
-  echo "Current API key (read-only): $cur_api_key"
+  echo "Current API key: [configured]"
   local name ftp_username validation_endpoint photo_endpoint
   name="$(prompt_with_default "Name" "$cur_name")"
   ftp_username="$(prompt_with_default "FTP username" "$cur_ftp_username")"

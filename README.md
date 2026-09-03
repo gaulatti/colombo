@@ -73,6 +73,9 @@ For `colombo.gaulatti.com`, obtain and renew the certificate on the host with Le
 - The scrape preserves the bounded v1 domain families for build identity, FTP sessions and lifecycle, authentication, upload queues/outcomes, CMS/S3 duration, and credential retries. Labels never contain usernames, assignments, filenames, buckets, URLs, or exception text.
 - Other routes retain the v1 protected response behavior (`401`).
 - `tenants-cli` remains installed in the runtime container.
+- Tenant inspection reports whether an API key is configured without printing
+  the key. Creation and explicit rotation are the only commands that reveal a
+  newly generated key.
 
 Useful commands:
 
