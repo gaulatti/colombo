@@ -35,6 +35,8 @@ docker compose exec colombo tenants-cli
 
 The default ports are HTTP `8080`, FTP/explicit FTPS `2121`, and passive FTP `60000-60010` in Compose. PostgreSQL and mock CMS/S3 dependencies are local-only; the deployable application remains one Colombo container.
 
+Passive data ports are prebound by the Colombo process. When an FTP client sends a new `PASV` command, the previously reserved endpoint is retired before the replacement is issued. This preserves the v1 behavior required by persistent camera clients and prevents stale data channels during upload bursts.
+
 ## HTTP upload
 
 ```bash

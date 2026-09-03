@@ -1,0 +1,186 @@
+# [libunftp](https://github.com/bolcom/libunftp)
+
+[![Crate Version](https://img.shields.io/crates/v/libunftp.svg)](https://crates.io/crates/libunftp)
+[![API Docs](https://docs.rs/libunftp/badge.svg)](https://docs.rs/libunftp)
+[![Build Status](https://github.com/bolcom/libunftp/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/bolcom/libunftp/actions/workflows/rust.yml)
+[![Crate License](https://img.shields.io/crates/l/libunftp.svg)](https://crates.io/crates/libunftp)
+[![Follow on Telegram](https://img.shields.io/badge/Follow%20on-Telegram-brightgreen.svg)](https://t.me/unftp)
+
+When you need to FTP, but don't want to.
+
+![logo](logo.png)
+
+[**Website**](https://unftp.rs) | [**API Docs**](https://docs.rs/libunftp) | [**unFTP**](https://github.com/bolcom/unFTP)
+
+The libunftp library drives [unFTP](https://github.com/bolcom/unFTP). It's an extensible, async, cloud orientated FTP(S)
+server implementation in [Rust](https://rust-lang.org) brought to you by the [bol.com techlab](https://techlab.bol.com).
+
+Because of its plug-able authentication (e.g. PAM, JSON File, Generic REST) and storage
+backends (e.g. local filesystem, [Google Cloud Storage](https://cloud.google.com/storage)) it's
+more flexible than traditional FTP servers and a perfect match for the cloud.
+
+It runs on top of the [Tokio](https://tokio.rs) asynchronous run-time and tries to make use of Async IO as much as
+possible.
+
+Feature highlights:
+
+* 42 Supported FTP commands (see [commands directory](./src/server/controlchan/commands)) and growing
+* Ability to implement own storage back-ends
+* Ability to implement own authentication back-ends
+* Explicit FTPS (TLS)
+* Mutual TLS (Client certificates)
+* TLS session resumption
+* Prometheus integration (enabled by default, can be disabled)
+* Structured Logging
+* [Proxy Protocol](https://www.haproxy.com/blog/haproxy/proxy-protocol/) support (enabled by default, can be disabled)
+* Automatic session timeouts
+* Per user IP allow lists
+* Configurable cryptographic providers (ring or aws-lc-rs)
+
+Known storage back-ends:
+
+* [unftp-sbe-fatfs](https://crates.io/crates/unftp-sbe-fatfs) - Provides read-only access to FAT filesystem images
+* [unftp-sbe-fs](https://crates.io/crates/unftp-sbe-fs) - Stores files on the local filesystem
+* [unftp-sbe-gcs](https://crates.io/crates/unftp-sbe-gcs) - Stores files in Google Cloud Storage
+* [unftp-sbe-iso](https://crates.io/crates/unftp-sbe-iso) - Provides FTP access to ISO 9660 files
+* [unftp-sbe-opendal](https://crates.io/crates/unftp-sbe-opendal) - Provides access to various storage services through
+  Apache OpenDAL (supports S3, Azure Blob Storage, and more)
+* [unftp-sbe-restrict](https://crates.io/crates/unftp-sbe-restrict) - Wraps another storage back-end in order to
+  restrict
+  the FTP operations a user can do i.e. provide authorization.
+* [unftp-sbe-rooter](https://crates.io/crates/unftp-sbe-rooter) - Wraps another storage back-end in order to root a user
+  to a specific home directory.
+* [unftp-sbe-webdav](https://crates.io/crates/unftp-sbe-webdav) - A WebDAV storage back-end providing translation
+  between FTP & WebDAV
+
+Known authentication back-ends:
+
+* [unftp-auth-jsonfile](https://crates.io/crates/unftp-auth-jsonfile) - Authenticates against JSON text.
+* [unftp-auth-pam](https://crates.io/crates/unftp-auth-pam) - Authenticates
+  via [PAM](https://en.wikipedia.org/wiki/Linux_PAM).
+* [unftp-auth-rest](https://crates.io/crates/unftp-auth-rest) - Consumes an HTTP API to authenticate.
+
+## Cryptographic Providers
+
+These two feature flags can be used to select the cryptographic provider:
+
+- `aws_lc_rs` (default): Uses AWS-LC through `rustls` for cryptographic operations
+- `ring`: Uses the ring crate for cryptographic operations
+
+To use a specific provider, enable the corresponding feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+libunftp = { version = "0.23.0", features = ["ring"] }  # Use ring
+# or
+libunftp = { version = "0.23.0", features = ["aws_lc_rs"] }  # Use aws-lc-rs (default)
+```
+
+The default provider is `aws-lc-rs` for backward compatibility. Choose the provider that best fits your needs:
+
+- [`ring`](https://crates.io/crates/ring): More widely used, good for general-purpose applications
+- [`aws-lc-rs`](https://crates.io/crates/aws-lc-rs): Optimized for AWS environments, good for cloud deployments
+
+## Optional Features
+
+The following feature flags are included in the default features but can be disabled to reduce dependencies:
+
+- `prometheus`: Enables Prometheus metrics integration. When enabled, you can collect metrics about FTP operations,
+  sessions, and transfers using the `.metrics()` method on the server builder. **Enabled by default.**
+
+- `proxy_protocol`: Enables [Proxy Protocol](https://www.haproxy.com/blog/haproxy/proxy-protocol/) support. This allows
+  the server to receive client connection information (IP address and port) when behind a proxy or load balancer. *
+  *Enabled by default.**
+
+To disable these features and reduce dependencies, use `default-features = false` and explicitly enable only what you
+need:
+
+```toml
+[dependencies]
+libunftp = { version = "0.22.0", default-features = false, features = ["aws_lc_rs"] }
+```
+
+Or enable all features explicitly:
+
+```toml
+[dependencies]
+libunftp = { version = "0.22.0", features = ["all"] }
+```
+
+## Prerequisites
+
+You'll need [Rust](https://rust-lang.org) 1.85.0 or higher to build libunftp.
+
+## Getting started
+
+If you've got Rust and cargo installed, create your project with
+
+```sh
+cargo new myftp
+```
+
+Add the libunftp and tokio crates to your project's dependencies in `Cargo.toml`. Then also choose
+a [storage back-end implementation](https://crates.io/search?page=1&per_page=10&q=unftp-sbe) to
+add. Here we choose the [file system back-end](https://crates.io/crates/unftp-sbe-fs):
+
+```toml
+[dependencies]
+libunftp = "0.23.0"
+unftp-sbe-fs = "0.4.0"
+tokio = { version = "1", features = ["full"] }
+```
+
+Now you're ready to develop your server!
+Add the following to `src/main.rs`:
+
+```rust
+use libunftp::ServerBuilder;
+use unftp_sbe_fs::Filesystem;
+
+#[tokio::main]
+pub async fn main() {
+    let ftp_home = std::env::temp_dir();
+    let server = ServerBuilder::new(Box::new(move || Filesystem::new(ftp_home.clone()).unwrap()))
+        .greeting("Welcome to my FTP server")
+        .passive_ports(50000..=65535)
+        .build()
+        .unwrap();
+
+    server.listen("127.0.0.1:2121").await;
+}
+```
+
+You can now run your server with `cargo run` and connect to `localhost:2121` with your favourite FTP client e.g.:
+
+```sh
+lftp -p 2121 localhost
+```
+
+For more help refer to:
+
+- the [examples](./examples) directory.
+- the [API Documentation](https://docs.rs/libunftp).
+- [unFTP server](https://github.com/bolcom/unFTP), a server from the bol.com techlab that is built on top of libunftp.
+- this [blog post](https://blog.abstractinvoke.com/05-07-unftp.html) about libunftp and unFTP.
+
+## Getting help and staying informed
+
+Support is given on a best effort basis. You are welcome to engage us
+on [the discussions page](https://github.com/bolcom/libunftp/discussions)
+or create a Github issue.
+
+You can also follow news and talk to us on [Telegram](https://t.me/unftp)
+
+## Contributing
+
+Thank you for your interest in contributing to libunftp!
+
+Please feel free to create a Github issue if you encounter any problems.
+
+Want to submit a feature request or develop your own storage or authentication back-end? Then head over to
+our [contribution guide (CONTRIBUTING.md)](CONTRIBUTING.md).
+
+## License
+
+You're free to use, modify and distribute this software under the terms of
+the [Apache License v2.0](http://www.apache.org/licenses/LICENSE-2.0).

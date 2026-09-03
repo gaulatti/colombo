@@ -1,0 +1,182 @@
+//! The RFC 959 Password (`PASS`) command
+//
+// The argument field is a Telnet string specifying the user's
+// password.  This command must be immediately preceded by the
+// user name command, and, for some sites, completes the user's
+// identification for access control.  Since password
+// information is quite sensitive, it is desirable in general
+// to "mask" it or suppress typeout.  It appears that the
+// server has no foolproof way to achieve this.  It is
+// therefore the responsibility of the user-FTP process to hide
+// the sensitive password information.
+
+use crate::server::{
+    chancomms::ControlChanMsg,
+    controlchan::{
+        Reply, ReplyCode,
+        error::ControlChanError,
+        handler::{CommandContext, CommandHandler},
+    },
+    failed_logins::LockState,
+    password,
+    session::SessionState,
+};
+use async_trait::async_trait;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::mpsc::Sender, time::sleep};
+use unftp_core::auth::{ChannelEncryptionState, UserDetail};
+use unftp_core::storage::{Metadata, StorageBackend};
+
+#[derive(Debug)]
+pub struct Pass {
+    password: password::Password,
+}
+
+impl Pass {
+    pub fn new(password: password::Password) -> Self {
+        Pass { password }
+    }
+}
+
+#[async_trait]
+impl<Storage, User> CommandHandler<Storage, User> for Pass
+where
+    User: UserDetail + 'static,
+    Storage: StorageBackend<User> + 'static,
+    Storage::Metadata: Metadata,
+{
+    #[tracing_attributes::instrument]
+    async fn handle(&self, args: CommandContext<Storage, User>) -> Result<Reply, ControlChanError> {
+        let session = args.session.lock().await;
+        let logger = args.logger;
+        match &session.state {
+            SessionState::WaitPass => {
+                let pass: &str = std::str::from_utf8(self.password.as_ref())?;
+                let pass: String = pass.to_string();
+                let username: String = match session.username.clone() {
+                    Some(v) => v,
+                    None => {
+                        slog::error!(logger, "NoneError for username. This shouldn't happen.");
+                        return Ok(Reply::new(ReplyCode::NotLoggedIn, "Please open a new connection to re-authenticate"));
+                    }
+                };
+                let tx: Sender<ControlChanMsg> = args.tx_control_chan.clone();
+
+                let auth_pipeline = args.auth_pipeline.clone();
+
+                // without this, the REST authenticator hangs when
+                // performing a http call through Hyper
+                let session2clone = args.session.clone();
+                let creds = unftp_core::auth::Credentials {
+                    password: Some(pass),
+                    source_ip: session.source.ip(),
+                    certificate_chain: session.cert_chain.clone(),
+                    command_channel_security: if session.cmd_tls {
+                        ChannelEncryptionState::Tls
+                    } else {
+                        ChannelEncryptionState::Plaintext
+                    },
+                };
+                let failed_logins = session.failed_logins.clone();
+                let source_ip = session.source.ip();
+                tokio::spawn(async move {
+                    let msg = match auth_pipeline.authenticate_and_get_user(&username, &creds).await {
+                        Ok(user) => {
+                            let is_locked = match failed_logins {
+                                Some(failed_logins) => {
+                                    let result = failed_logins.success(source_ip, username.clone()).await;
+                                    if let Some(state) = result {
+                                        slog::warn!(
+                                            logger,
+                                            "PASS: User authenticated but currently locked out due to previous failed login attempts according to the policy! (Username={}. Note: the account automatically unlocks after the configured period if no further failed login attempts occur. state={:?})",
+                                            username,
+                                            state
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                None => false,
+                            };
+
+                            if is_locked {
+                                sleep(Duration::from_millis(1500)).await;
+                                ControlChanMsg::AuthFailed
+                            } else if user.account_enabled() {
+                                let mut session = session2clone.lock().await;
+                                // Using Arc::get_mut means that this won't work if the Session is
+                                // currently servicing multiple commands concurrently.  But it
+                                // shouldn't ever be servicing PASS at the same time as another
+                                // command.
+                                match Arc::get_mut(&mut session.storage).map(|s| s.enter(&user)) {
+                                    Some(Err(e)) => {
+                                        slog::error!(logger, "{}", e);
+                                        ControlChanMsg::AuthFailed
+                                    }
+                                    None => {
+                                        slog::error!(logger, "Failed to lock Session::storage during PASS.");
+                                        ControlChanMsg::AuthFailed
+                                    }
+                                    Some(Ok(())) => {
+                                        slog::info!(logger, "PASS: User {} logged in", user);
+                                        session.user = Arc::new(Some(user));
+                                        ControlChanMsg::AuthSuccess {
+                                            username,
+                                            trace_id: session.trace_id,
+                                        }
+                                    }
+                                }
+                            } else {
+                                slog::warn!(logger, "PASS: User {} authenticated but account is disabled", user);
+                                ControlChanMsg::AuthFailed
+                            }
+                        }
+                        Err(unftp_core::auth::AuthenticationError::BadUser) => {
+                            slog::warn!(logger, "PASS: Login attempt for unknown user {}", username);
+                            ControlChanMsg::AuthFailed
+                        }
+                        Err(err) => {
+                            slog::warn!(logger, "PASS: Failed login attempt for user {}, reason={}", username, err);
+                            if let Some(failed_logins) = failed_logins {
+                                let result = failed_logins.failed(source_ip, username.clone()).await;
+                                if let Some(state) = result {
+                                    match state {
+                                        LockState::MaxFailuresReached => {
+                                            slog::warn!(
+                                                logger,
+                                                "PASS: Maximum number bad login attempts reached according to the policy so the locking policy is now active (Username={}, IP={}, LockState={:?})",
+                                                username,
+                                                source_ip,
+                                                state
+                                            );
+                                        }
+                                        LockState::AlreadyLocked => {
+                                            slog::info!(
+                                                logger,
+                                                "PASS: Another bad login attempt but the locking policy is already active (Username={}, IP={}, LockState={:?})",
+                                                username,
+                                                source_ip,
+                                                state
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            ControlChanMsg::AuthFailed
+                        }
+                    };
+                    tokio::spawn(async move {
+                        if let Err(err) = tx.send(msg).await {
+                            slog::warn!(logger, "PASS: Could not send internal message: {}", err);
+                        }
+                    });
+                });
+                Ok(Reply::none())
+            }
+            SessionState::New => Ok(Reply::new(ReplyCode::BadCommandSequence, "Please supply a username first")),
+            _ => Ok(Reply::new(ReplyCode::NotLoggedIn, "Please open a new connection to re-authenticate")),
+        }
+    }
+}

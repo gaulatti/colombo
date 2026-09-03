@@ -38,6 +38,9 @@ unftp-sbe-fs = "=0.4.0"
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["v4"] }
 
+[patch.crates-io]
+libunftp = { path = "vendor/libunftp" }
+
 [dev-dependencies]
 assert-json-diff = "2.0.2"
 http-body-util = "0.1.3"

@@ -68,6 +68,10 @@ printf 'plain-body' > "$cert_dir/plain.txt"
 curl --silent --show-error --user photographer:secret \
   -T "$cert_dir/plain.txt" ftp://127.0.0.1:12121/plain.txt
 
+# A new PASV command must retire the prior data endpoint, matching v1 and
+# preventing persistent camera clients from leaving orphaned data channels.
+python3 "$repo_dir/tests/ftp_pasv_state.py" "$COLOMBO_FTP_HOST_PORT"
+
 # Two live sessions for the same username must retain independent connection state.
 printf 'concurrent-a' > "$cert_dir/concurrent-a.txt"
 printf 'concurrent-b' > "$cert_dir/concurrent-b.txt"
@@ -82,6 +86,7 @@ for _ in $(seq 1 40); do
   if echo "$state" | grep -q 'assignment-123/demo/readme-0007.md' \
     && echo "$state" | grep -q 'assignment-123/ftp.txt' \
     && echo "$state" | grep -q 'assignment-123/plain.txt' \
+    && echo "$state" | grep -q 'assignment-123/camera-pasv-regression.jpg' \
     && echo "$state" | grep -q 'assignment-123/concurrent-a.txt' \
     && echo "$state" | grep -q 'assignment-123/concurrent-b.txt'; then
     echo "$state" | grep -q '"original_filename": "README.md"'

@@ -422,6 +422,7 @@ pub async fn serve(
     .user_detail_provider(provider)
     .authenticator(auth)
     .passive_ports(config.passive_ports.clone())
+    .pooled_listener_mode()
     .idle_session_timeout(300)
     .metrics();
     if let Some(host) = config.passive_external_address.as_deref() {

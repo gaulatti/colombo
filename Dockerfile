@@ -3,6 +3,7 @@ RUN apk add --no-cache clang cmake make musl-dev perl
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
+COPY vendor ./vendor
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
