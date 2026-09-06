@@ -13,7 +13,9 @@ use unftp_core::{
         AuthenticationError, Authenticator, Credentials, Principal, UserDetail, UserDetailError,
         UserDetailProvider,
     },
-    storage::{Fileinfo, Result as StorageResult, StorageBackend},
+    storage::{
+        Error as StorageError, ErrorKind, Fileinfo, Result as StorageResult, StorageBackend,
+    },
 };
 use unftp_sbe_fs::{Filesystem, Meta};
 use uuid::Uuid;
@@ -275,11 +277,16 @@ impl StorageBackend<ColomboUser> for ColomboStorage {
             .and_then(|v| v.to_str())
             .unwrap_or("upload")
             .to_owned();
-        self.uploads.queue_ftp(
-            user.lease.session.clone(),
-            filename,
-            self.root.join(relative),
-        );
+        let operation_id = self
+            .uploads
+            .accept_ftp(
+                user.lease.session.clone(),
+                filename,
+                self.root.join(relative),
+            )
+            .await
+            .map_err(|error| StorageError::new(ErrorKind::LocalError, error))?;
+        tracing::info!(%operation_id, "FTP upload durably accepted");
         Ok(bytes)
     }
     async fn del<P: AsRef<Path> + Send + Debug>(

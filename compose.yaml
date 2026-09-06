@@ -32,6 +32,7 @@ services:
       COLOMBO_FTP_PASSIVE_PORTS: "60000-60010"
       COLOMBO_FTP_PASSIVE_EXTERNAL_ADDRESS: "127.0.0.1"
       COLOMBO_METRICS_TOKEN: "local-metrics-token"
+      COLOMBO_SPOOL_PATH: "/var/lib/colombo/spool"
       DATABASE_URL: "jdbc:postgresql://postgres:5432/colombo"
       DATABASE_USER: "colombo"
       DATABASE_PASSWORD: "colombo"
@@ -50,6 +51,8 @@ services:
       - "60000-60010:60000-60010"
     volumes:
       - "${COLOMBO_TEST_CERT_DIR:-./tests/empty-certs}:/certs:ro"
+      - colombo-spool:/var/lib/colombo/spool
 
 volumes:
   colombo-postgres:
+  colombo-spool:

@@ -18,6 +18,7 @@ pub struct Config {
     pub master_password: Option<String>,
     pub metrics_token: Option<String>,
     pub build_version: String,
+    pub spool_path: PathBuf,
     pub ftp_root: PathBuf,
 }
 
@@ -33,6 +34,7 @@ impl std::fmt::Debug for Config {
             .field("database_url", &redact_database_url(&self.database_url))
             .field("migrations_enabled", &self.migrations_enabled)
             .field("build_version", &self.build_version)
+            .field("spool_path", &self.spool_path)
             .field("ftp_root", &self.ftp_root)
             .finish_non_exhaustive()
     }
@@ -61,6 +63,10 @@ impl Config {
             bail!("COLOMBO_METRICS_TOKEN must contain at least 16 non-whitespace characters");
         }
 
+        let spool_path = optional("COLOMBO_SPOOL_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::temp_dir().join("colombo-spool"));
+
         Ok(Self {
             http_port: parse("PORT", 8080)?,
             ftp_enabled: parse_bool_alias("COLOMBO_FTP_ENABLED", "colombo.ftp.enabled", true)?,
@@ -77,7 +83,8 @@ impl Config {
                 .or_else(|| optional("COLOMBO_DEV_PASSWORD")),
             metrics_token,
             build_version: value("COLOMBO_BUILD_VERSION", "development"),
-            ftp_root: env::temp_dir(),
+            ftp_root: spool_path.join("ftp-incoming"),
+            spool_path,
         })
     }
 

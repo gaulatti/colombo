@@ -11,11 +11,11 @@ The previous Java implementation is preserved on the `archive/v1-java` branch.
 1. Resolve the FTP username in PostgreSQL.
 2. POST the supplied credential to that tenant's validation endpoint.
 3. Receive an assignment ID and short-lived S3 credentials.
-4. Accept the file onto local storage.
-5. Return FTP `226` or HTTP `202` immediately after local acceptance.
-6. Upload to S3 and then POST the photo callback in the background.
+4. Hash and fsync the file and private operation context into an atomic durable spool entry.
+5. Return FTP `226` or HTTP `202` only after that entry is recoverable after a restart.
+6. Upload to a stable S3 key and persist delivery before independently retrying the CMS callback.
 
-FTP files remain in the shared temporary FTP filesystem, matching v1. HTTP temporary files are deleted after the S3 attempt. Each FTP connection has isolated session credentials, including when one username is connected concurrently.
+Eight fixed workers recover accepted or in-flight entries at startup. Per-operation file locks prevent concurrent processes from executing the same entry. S3 and callback attempts each have a five-attempt retry budget; the persisted S3 key and callback payload remain stable across attempts. Each FTP connection still has isolated session credentials, including when one username is connected concurrently.
 
 ## Local start
 
@@ -49,10 +49,20 @@ curl -X POST http://localhost:8080/upload \
 Successful local acceptance returns:
 
 ```json
-{"status":"accepted","assignment_id":"..."}
+{"status":"accepted","assignment_id":"...","operation_id":"..."}
 ```
 
-The multipart request limit is 100 MiB. The FTP-only master-password support bypass is never accepted by this endpoint.
+The same operation ID is written to Colombo's structured log before an FTP upload receives `226`. The multipart request limit is 100 MiB. The FTP-only master-password support bypass is never accepted by this endpoint.
+
+Use the same tenant headers to read the durable receipt:
+
+```bash
+curl http://localhost:8080/uploads/OPERATION_ID \
+  -H 'X-Colombo-Username: photographer' \
+  -H 'X-Colombo-Password: cms-credential'
+```
+
+Receipt states are `accepted`, `uploading`, `delivered`, `callback-confirmed`, `failed`, and `expired`. Receipts include the assignment, protocol, byte count, SHA-256 checksum, timestamps, and bounded attempt/failure fields; they never include local paths, credentials, bucket names, object keys, or raw errors. Unknown or tenant/assignment-mismatched IDs return `404`, bad credentials return `401`, and retained expired receipts return `410`.
 
 ## FTPS
 
@@ -70,7 +80,9 @@ For `colombo.gaulatti.com`, obtain and renew the certificate on the host with Le
 - `GET /actuator/health` is public and checks PostgreSQL.
 - `GET /actuator/prometheus` requires `Authorization: Bearer $COLOMBO_METRICS_TOKEN`; without a configured token it remains inaccessible.
 - A configured `COLOMBO_METRICS_TOKEN` must be at least 16 characters.
-- The scrape preserves the bounded v1 domain families for build identity, FTP sessions and lifecycle, authentication, upload queues/outcomes, CMS/S3 duration, and credential retries. Labels never contain usernames, assignments, filenames, buckets, URLs, or exception text.
+- `COLOMBO_SPOOL_PATH` must be persistent across process, container, and host-service restarts. Compose and the deploy workflow mount the `colombo-spool` Docker volume at `/var/lib/colombo/spool`.
+- Confirmed receipts are retained for seven days; terminal failures and quarantined bytes are retained for 30 days; expired receipt tombstones remain for another 30 days. Operators may remove an expired operation directory and its matching quarantine file earlier when policy requires it, but must not edit live entries.
+- The scrape preserves the bounded v1 domain families and adds durable-operation count, oldest-age, and outcome families. Labels never contain usernames, assignments, filenames, buckets, URLs, object keys, or exception text.
 - Other routes retain the v1 protected response behavior (`401`).
 - `tenants-cli` remains installed in the runtime container.
 - Tenant inspection reports whether an API key is configured without printing

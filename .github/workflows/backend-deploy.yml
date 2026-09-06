@@ -128,6 +128,8 @@ jobs:
                 -e FLYWAY_ENABLED="$FLYWAY_ENABLED" \
                 -e COLOMBO_METRICS_TOKEN="$COLOMBO_METRICS_TOKEN" \
                 -e COLOMBO_BUILD_VERSION="$BUILD_VERSION" \
+                -e COLOMBO_SPOOL_PATH="/var/lib/colombo/spool" \
+                -v colombo-spool:/var/lib/colombo/spool \
                 "${FTPS_ARGS[@]}" \
                 --restart=always \
                 ghcr.io/${{ github.repository }}:latest
