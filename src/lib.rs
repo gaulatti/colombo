@@ -6,4 +6,5 @@ pub mod ftp;
 pub mod http;
 pub mod metrics;
 pub mod naming;
+pub mod spool;
 pub mod upload;

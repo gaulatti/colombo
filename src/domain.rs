@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Clone, FromRow, Serialize)]
+#[derive(Clone, Deserialize, FromRow, Serialize)]
 pub struct Tenant {
     pub id: i64,
     pub name: String,
@@ -22,7 +22,7 @@ impl std::fmt::Debug for Tenant {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadCredentials {
     pub access_key_id: String,
@@ -123,7 +123,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadNamingPolicy {
     pub version: i32,
@@ -157,7 +157,7 @@ impl UploadNamingPolicy {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UploadNamingSegment {
     #[serde(rename = "type")]
     pub kind: String,

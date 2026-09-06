@@ -36,7 +36,14 @@ async fn run() -> Result<()> {
         .context("database startup failed")?;
     let metrics = Metrics::new(&config.build_version)?;
     let cms = CmsClient::new(metrics.clone())?;
-    let uploads = UploadService::new(cms.clone(), metrics.clone());
+    let uploads = UploadService::new(
+        pool.clone(),
+        cms.clone(),
+        metrics.clone(),
+        config.spool_path.clone(),
+    )
+    .await
+    .context("durable upload spool startup failed")?;
     let state = AppState {
         pool: pool.clone(),
         cms: cms.clone(),

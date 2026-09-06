@@ -6,7 +6,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,11 +16,13 @@ use sqlx::PgPool;
 use subtle::ConstantTimeEq;
 use tokio::io::AsyncWriteExt;
 use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
+use uuid::Uuid;
 
 use crate::{
     cms::{CmsClient, ValidationError},
     db,
     metrics::Metrics,
+    spool::UploadState,
     upload::UploadService,
 };
 
@@ -39,6 +41,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/upload", post(upload))
+        .route("/uploads/{operation_id}", get(upload_status))
         .route("/actuator/health", get(health))
         .route("/actuator/prometheus", get(prometheus))
         .fallback(|| async { StatusCode::UNAUTHORIZED })
@@ -76,6 +79,7 @@ async fn shutdown_signal() {
 struct Accepted {
     status: &'static str,
     assignment_id: String,
+    operation_id: Uuid,
 }
 
 async fn upload(
@@ -211,6 +215,14 @@ async fn upload(
                 "file part is required and must not be empty",
             );
         }
+        if output.sync_all().await.is_err() {
+            let _ = tokio::fs::remove_file(&path).await;
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to durably store uploaded file",
+            );
+        }
+        drop(output);
         accepted = Some((original, path));
     }
     let Some((original, path)) = accepted else {
@@ -220,15 +232,98 @@ async fn upload(
         );
     };
     let assignment_id = session.assignment_id.clone();
-    state.uploads.queue_http(session, original, path);
+    let receipt = match state
+        .uploads
+        .accept_http(session, original, path.clone())
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::error!(error = %err, "durable HTTP upload acceptance failed");
+            let _ = tokio::fs::remove_file(&path).await;
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to durably store uploaded file",
+            );
+        }
+    };
+    let _ = tokio::fs::remove_file(&path).await;
     (
         StatusCode::ACCEPTED,
         Json(Accepted {
             status: "accepted",
             assignment_id,
+            operation_id: receipt.operation_id,
         }),
     )
         .into_response()
+}
+
+async fn upload_status(
+    State(state): State<AppState>,
+    AxumPath(operation_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(username) =
+        required_header(&headers, "X-Colombo-Username").filter(|value| !value.trim().is_empty())
+    else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "X-Colombo-Username header is required",
+        );
+    };
+    let Some(password) = required_header(&headers, "X-Colombo-Password") else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "X-Colombo-Password header is required",
+        );
+    };
+    let tenant = match db::tenant_by_username(&state.pool, &username).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return error(StatusCode::UNAUTHORIZED, "Invalid credentials"),
+        Err(err) => {
+            tracing::error!(error = %err, "status tenant lookup failed");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "Tenant lookup failed");
+        }
+    };
+    let authenticated = match state
+        .cms
+        .validate(&tenant, &password, "validation_status")
+        .await
+    {
+        Ok(value) => value,
+        Err(ValidationError::Denied) => {
+            return error(StatusCode::UNAUTHORIZED, "Invalid credentials");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "upload status authentication failed");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Authentication unavailable",
+            );
+        }
+    };
+    let Ok(operation_id) = Uuid::parse_str(&operation_id) else {
+        return error(StatusCode::NOT_FOUND, "Upload operation not found");
+    };
+    match state
+        .uploads
+        .receipt_for_assignment(operation_id, tenant.id, authenticated.assignment_id)
+        .await
+    {
+        Ok(Some(receipt)) if receipt.state == UploadState::Expired => {
+            (StatusCode::GONE, Json(receipt)).into_response()
+        }
+        Ok(Some(receipt)) => (StatusCode::OK, Json(receipt)).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "Upload operation not found"),
+        Err(err) => {
+            tracing::error!(error = %err, "upload receipt lookup failed");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Upload receipt lookup failed",
+            )
+        }
+    }
 }
 
 fn required_header(headers: &HeaderMap, name: &'static str) -> Option<String> {

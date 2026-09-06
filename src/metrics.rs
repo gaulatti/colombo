@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use prometheus::{
-    Encoder, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, GaugeVec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    TextEncoder,
 };
 
 #[derive(Clone)]
@@ -16,6 +17,9 @@ pub struct Metrics {
     pub ftp_sessions: IntGauge,
     pub upload_queue_depth: IntGaugeVec,
     pub upload_active: IntGaugeVec,
+    pub spool_operations: IntGaugeVec,
+    pub spool_oldest_age: GaugeVec,
+    pub spool_outcomes: IntCounterVec,
 }
 
 impl Metrics {
@@ -65,6 +69,27 @@ impl Metrics {
             ),
             &["queue"],
         )?;
+        let spool_operations = IntGaugeVec::new(
+            Opts::new(
+                "colombo_upload_spool_operations",
+                "Durable upload operations by lifecycle state",
+            ),
+            &["state"],
+        )?;
+        let spool_oldest_age = GaugeVec::new(
+            Opts::new(
+                "colombo_upload_spool_oldest_age_seconds",
+                "Age of the oldest durable upload operation by lifecycle state",
+            ),
+            &["state"],
+        )?;
+        let spool_outcomes = IntCounterVec::new(
+            Opts::new(
+                "colombo_upload_spool_outcomes_total",
+                "Durable upload acceptance and terminal outcomes",
+            ),
+            &["source", "outcome"],
+        )?;
         authentication_attempts
             .with_label_values(&["ftp", "success"])
             .inc_by(0);
@@ -84,6 +109,20 @@ impl Metrics {
             .set(0);
         upload_active.with_label_values(&["s3_upload"]).set(0);
         upload_active.with_label_values(&["cms_callback"]).set(0);
+        for state in [
+            "accepted",
+            "uploading",
+            "delivered",
+            "callback_confirmed",
+            "failed",
+            "expired",
+        ] {
+            spool_operations.with_label_values(&[state]).set(0);
+            spool_oldest_age.with_label_values(&[state]).set(0.0);
+        }
+        spool_outcomes
+            .with_label_values(&["http", "accepted"])
+            .inc_by(0);
 
         registry.register(Box::new(authentication_attempts.clone()))?;
         registry.register(Box::new(ftp_connection_events.clone()))?;
@@ -93,6 +132,9 @@ impl Metrics {
         registry.register(Box::new(ftp_sessions.clone()))?;
         registry.register(Box::new(upload_queue_depth.clone()))?;
         registry.register(Box::new(upload_active.clone()))?;
+        registry.register(Box::new(spool_operations.clone()))?;
+        registry.register(Box::new(spool_oldest_age.clone()))?;
+        registry.register(Box::new(spool_outcomes.clone()))?;
         let build = IntGaugeVec::new(
             Opts::new("colombo_build_identity", "Running Colombo build identity"),
             &["service", "version"],
@@ -109,6 +151,9 @@ impl Metrics {
             ftp_sessions,
             upload_queue_depth,
             upload_active,
+            spool_operations,
+            spool_oldest_age,
+            spool_outcomes,
         }))
     }
 
@@ -166,6 +211,9 @@ mod tests {
             "colombo_upload_events_total",
             "colombo_dependency_request_duration_seconds",
             "colombo_retry_attempts_total",
+            "colombo_upload_spool_operations",
+            "colombo_upload_spool_oldest_age_seconds",
+            "colombo_upload_spool_outcomes_total",
         ] {
             assert!(text.contains(family), "missing {family}");
         }

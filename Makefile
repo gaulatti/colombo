@@ -66,4 +66,4 @@ docker-build:
 	@docker build -t colombo:local .
 
 docker-run:
-	@docker run --rm -p 8080:8080 -p 2121:2121 -p 60000-60100:60000-60100 --env-file .env colombo:local
+	@docker run --rm -p 8080:8080 -p 2121:2121 -p 60000-60100:60000-60100 --env-file .env -e COLOMBO_SPOOL_PATH=/var/lib/colombo/spool -v colombo-spool:/var/lib/colombo/spool colombo:local
