@@ -37,6 +37,8 @@ The default ports are HTTP `8080`, FTP/explicit FTPS `2121`, and passive FTP `60
 
 Passive data ports are prebound by the Colombo process. When an FTP client sends a new `PASV` command, the previously reserved endpoint is retired before the replacement is issued. This preserves the v1 behavior required by persistent camera clients and prevents stale data channels during upload bursts.
 
+FTP transfers do not hold the shared session mutex while waiting on the camera's data socket. If a camera drops its control connection during a stalled transfer, cleanup for that session cannot block the pooled listener from greeting other connections.
+
 ## HTTP upload
 
 ```bash

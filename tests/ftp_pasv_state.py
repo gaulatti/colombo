@@ -88,3 +88,34 @@ with socket.create_connection(CONTROL_ADDRESS, timeout=3) as control:
     if not read_reply(control).startswith("226"):
         raise RuntimeError("FTP server did not complete the upload")
     command(control, "QUIT", 221)
+
+
+# A camera can drop its control channel while leaving the data socket open.
+# Cleanup for that abandoned session must never block the pooled listener from
+# greeting the next client.
+stalled_control = socket.create_connection(CONTROL_ADDRESS, timeout=3)
+stalled_data = None
+try:
+    stalled_control.settimeout(2)
+    if not read_reply(stalled_control).startswith("220"):
+        raise RuntimeError("FTP server did not greet stalled-transfer client")
+    command(stalled_control, "USER photographer", 331)
+    command(stalled_control, "PASS secret", 230)
+    stalled_address = enter_passive_mode(stalled_control)
+    stalled_data = socket.create_connection(stalled_address, timeout=2)
+    command(stalled_control, "STOR abandoned-camera-transfer.jpg", 150)
+
+    # Give the data task time to enter its socket read, then abandon only the
+    # control connection. The data socket deliberately remains open.
+    time.sleep(0.1)
+    stalled_control.close()
+    time.sleep(0.2)
+
+    with socket.create_connection(CONTROL_ADDRESS, timeout=2) as next_control:
+        next_control.settimeout(2)
+        if not read_reply(next_control).startswith("220"):
+            raise RuntimeError("stalled transfer prevented the next FTP greeting")
+finally:
+    stalled_control.close()
+    if stalled_data is not None:
+        stalled_data.close()

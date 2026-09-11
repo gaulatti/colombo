@@ -112,8 +112,15 @@ where
         // TODO: Use configured timeout
         tokio::select! {
             Some(command) = data_cmd_rx.recv() => {
-                let session = session_arc.lock().await;
-                self.handle_incoming(DataChanMsg::ExternalCommand(command), session.start_pos).await;
+                // Only snapshot session state while holding the mutex. A data
+                // transfer can remain pending on a client socket indefinitely;
+                // retaining the guard across it prevents pooled-listener
+                // cleanup from accepting or greeting any other client.
+                let start_pos = {
+                    let session = session_arc.lock().await;
+                    session.start_pos
+                };
+                self.handle_incoming(DataChanMsg::ExternalCommand(command), start_pos).await;
             },
             Some(_) = data_abort_rx.recv() => {
                 self.handle_incoming(DataChanMsg::Abort, 0).await;
