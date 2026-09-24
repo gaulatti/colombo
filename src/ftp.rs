@@ -266,6 +266,10 @@ impl StorageBackend<ColomboUser> for ColomboStorage {
         P: AsRef<Path> + Send + Debug,
         R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static,
     {
+        self.uploads
+            .revalidate_ftp_session(&user.lease.session)
+            .await
+            .map_err(|error| StorageError::new(ErrorKind::PermissionDenied, error))?;
         let relative = path
             .as_ref()
             .strip_prefix("/")

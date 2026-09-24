@@ -10,6 +10,7 @@ pub struct Tenant {
     pub api_key: String,
     pub validation_endpoint: String,
     pub photo_endpoint: String,
+    pub revalidate_after_seconds: Option<i32>,
 }
 
 impl std::fmt::Debug for Tenant {

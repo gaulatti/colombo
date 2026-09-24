@@ -10,6 +10,9 @@ STATE = {
     "s3_requests": [],
     "objects": [],
     "callback_failures": 0,
+    "validation_requests": 0,
+    "validation_mode": "normal",
+    "validation_assignment": "assignment-123",
 }
 STATE_CHANGED = threading.Condition()
 
@@ -41,12 +44,20 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self._body() or b"{}")
         if self.path == "/control":
             with STATE_CHANGED:
-                for key in ("hold_s3", "s3_failures", "callback_failures"):
+                for key in ("hold_s3", "s3_failures", "callback_failures", "validation_mode", "validation_assignment"):
                     if key in body:
                         STATE[key] = body[key]
                 STATE_CHANGED.notify_all()
             return self._json(200, {"status": "updated"})
         if self.path == "/validate":
+            with STATE_CHANGED:
+                STATE["validation_requests"] += 1
+                validation_mode = STATE["validation_mode"]
+                validation_assignment = STATE["validation_assignment"]
+            if validation_mode == "unavailable":
+                return self._json(503, {})
+            if validation_mode == "denied":
+                return self._json(401, {})
             if self.headers.get("X-Colombo-API-Key") != "tenant-api-key" or body.get(
                 "key"
             ) not in ("secret", "naming", "other-assignment"):
@@ -82,8 +93,9 @@ class Handler(BaseHTTPRequestHandler):
             assignment_id = (
                 "assignment-other"
                 if body["key"] == "other-assignment"
-                else "assignment-123"
+                else validation_assignment
             )
+            upload["keyPrefix"] = assignment_id
             return self._json(200, {"assignmentId": assignment_id, "upload": upload})
         if self.path == "/sequence":
             return self._json(200, {"sequence": 7})

@@ -554,6 +554,7 @@ mod tests {
                 api_key: "not-serialized-here".into(),
                 validation_endpoint: "http://example.test/validate".into(),
                 photo_endpoint: "http://example.test/photo".into(),
+                revalidate_after_seconds: None,
             },
             assignment_id: "assignment-123".into(),
             upload: Some(UploadCredentials {
