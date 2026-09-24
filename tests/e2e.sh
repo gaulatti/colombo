@@ -133,6 +133,33 @@ STATE_JSON="$state" python3 -c 'import json,os; value=json.loads(os.environ["STA
 docker compose -f "$repo_dir/compose.yaml" run --rm --no-deps --entrypoint sh colombo -c \
   'test "$(find /var/lib/colombo/spool/operations -mindepth 1 -maxdepth 1 -type d | wc -l)" -ge 2 && test "$(find /var/lib/colombo/spool/operations -name record.json | wc -l)" -ge 2 && test "$(find /var/lib/colombo/spool/operations -name content | wc -l)" -ge 2 && test -z "$(find /var/lib/colombo/spool/ftp-incoming -type f -print -quit)"'
 
+# Convert one accepted operation to the pre-change JSON shape while Colombo is
+# stopped, then prove the existing recovery path delivers it after restart.
+legacy_container="$(docker compose -f "$repo_dir/compose.yaml" ps -aq colombo)"
+for filename in record.json private.json; do
+  docker cp "$legacy_container:/var/lib/colombo/spool/operations/$operation_id/$filename" "$cert_dir/$filename"
+done
+python3 - "$cert_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+record_path = directory / "record.json"
+record = json.loads(record_path.read_text())
+record.pop("device_id", None)
+record.pop("wanderer_reason", None)
+record_path.write_text(json.dumps(record))
+private_path = directory / "private.json"
+private = json.loads(private_path.read_text())
+private["upload"].pop("credentialsEndpoint", None)
+private["upload"].pop("wanderersEndpoint", None)
+private_path.write_text(json.dumps(private))
+PY
+for filename in record.json private.json; do
+  docker cp "$cert_dir/$filename" "$legacy_container:/var/lib/colombo/spool/operations/$operation_id/$filename"
+done
+
 mock_control '{"hold_s3": false, "s3_failures": 1, "callback_failures": 1}'
 docker compose -f "$repo_dir/compose.yaml" up -d --wait colombo
 for _ in $(seq 1 80); do
