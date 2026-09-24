@@ -36,6 +36,10 @@ pub struct UploadCredentials {
     pub naming_policy: Option<UploadNamingPolicy>,
     #[serde(default)]
     pub sequence_endpoint: Option<String>,
+    #[serde(default)]
+    pub credentials_endpoint: Option<String>,
+    #[serde(default)]
+    pub wanderers_endpoint: Option<String>,
 }
 
 impl std::fmt::Debug for UploadCredentials {
@@ -69,7 +73,14 @@ impl UploadCredentials {
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
         });
-        credentials_valid && naming_valid
+        let late_endpoints_valid = match (&self.credentials_endpoint, &self.wanderers_endpoint) {
+            (None, None) => true,
+            (Some(credentials), Some(wanderers)) => {
+                !credentials.trim().is_empty() && !wanderers.trim().is_empty()
+            }
+            _ => false,
+        };
+        credentials_valid && naming_valid && late_endpoints_valid
     }
 }
 
@@ -88,6 +99,8 @@ mod tests {
             expires_at: "g".into(),
             naming_policy: None,
             sequence_endpoint: None,
+            credentials_endpoint: None,
+            wanderers_endpoint: None,
         }
     }
 
@@ -120,6 +133,17 @@ mod tests {
         assert!(!value.valid());
         value.sequence_endpoint = Some("/sequence".into());
         assert!(value.valid());
+    }
+
+    #[test]
+    fn late_delivery_endpoints_are_advertised_together() {
+        let mut value = credentials();
+        value.wanderers_endpoint = Some("/wanderers".into());
+        assert!(!value.valid());
+        value.credentials_endpoint = Some("/credentials".into());
+        assert!(value.valid());
+        value.credentials_endpoint = Some(" ".into());
+        assert!(!value.valid());
     }
 }
 
@@ -171,6 +195,8 @@ pub struct UploadNamingSegment {
 #[serde(rename_all = "camelCase")]
 pub struct ValidationResponse {
     pub assignment_id: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub upload: UploadCredentials,
 }
 
@@ -180,6 +206,7 @@ pub struct SessionData {
     pub assignment_id: String,
     pub upload: Option<UploadCredentials>,
     pub validation_key: Option<String>,
+    pub device_id: Option<String>,
 }
 
 impl std::fmt::Debug for SessionData {

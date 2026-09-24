@@ -126,6 +126,7 @@ impl Authenticator for FtpAuth {
                 assignment_id: format!("support-assignment-{username}"),
                 upload: None,
                 validation_key: None,
+                device_id: None,
             }
         } else {
             match self

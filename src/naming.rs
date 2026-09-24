@@ -145,7 +145,7 @@ fn split_name(name: &str) -> (&str, &str) {
     }
 }
 
-fn sanitize(value: &str) -> String {
+pub fn sanitize(value: &str) -> String {
     let mut output = String::new();
     for c in value.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -157,7 +157,7 @@ fn sanitize(value: &str) -> String {
     output.trim_matches(['.', '-']).to_owned()
 }
 
-fn validate_target(target: &str) -> Result<()> {
+pub fn validate_target(target: &str) -> Result<()> {
     if target.trim().is_empty()
         || target.starts_with('/')
         || target.contains('\\')
