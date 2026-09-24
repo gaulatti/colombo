@@ -89,11 +89,11 @@ def main():
     denied_count = state()["validation_requests"]
     control(validation_mode="normal")
     try:
-        stor(first, "revalidation-evicted.txt")
-    except ftplib.error_perm:
+        first.voidcmd("NOOP")
+    except (EOFError, OSError):
         pass
     else:
-        raise AssertionError("evicted session accepted STOR")
+        raise AssertionError("revoked FTP control connection remained usable")
     assert state()["validation_requests"] == denied_count
     assert spool_count() == before_denial
     first.close()
@@ -115,7 +115,6 @@ def main():
     else:
         raise AssertionError("reassigned uploads were not delivered")
     assert not any("revalidation-denied.txt" in obj for obj in objects)
-    assert not any("revalidation-evicted.txt" in obj for obj in objects)
 
 
 if __name__ == "__main__":

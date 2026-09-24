@@ -269,7 +269,9 @@ impl StorageBackend<ColomboUser> for ColomboStorage {
         self.uploads
             .revalidate_ftp_session(&user.lease.session)
             .await
-            .map_err(|error| StorageError::new(ErrorKind::PermissionDenied, error))?;
+            .map_err(|_| {
+                StorageError::new(ErrorKind::PermissionDenied, libunftp::SessionRevoked)
+            })?;
         let relative = path
             .as_ref()
             .strip_prefix("/")

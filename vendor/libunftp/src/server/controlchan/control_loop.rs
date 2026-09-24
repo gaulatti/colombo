@@ -276,6 +276,12 @@ where
 
                     // TODO: Handle Event::InternalMsg(InternalMsg::PlaintextControlChannel)
 
+                    let session_revoked = matches!(
+                        &event,
+                        Event::InternalMsg(ControlChanMsg::StorageError(error))
+                            if std::error::Error::source(error)
+                                .is_some_and(|source| source.is::<crate::SessionRevoked>())
+                    );
                     let handle_result = match event_chain.handle(event).await {
                         Err(e) => Err(e),
                         Ok(reply) => reply_sink.send(reply).await,
@@ -283,6 +289,9 @@ where
 
                     if let Err(chan_err) = handle_result {
                         slog::warn!(logger, "Event handler chain error: {:?}. Closing control connection", chan_err);
+                        return;
+                    }
+                    if session_revoked {
                         return;
                     }
                 }
