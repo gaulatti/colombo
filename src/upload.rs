@@ -37,6 +37,7 @@ const WORK_QUEUE_CAPACITY: usize = 256;
 pub struct SessionHandle {
     data: RwLock<SessionData>,
     valid: AtomicBool,
+    last_validated: Mutex<Instant>,
 }
 
 impl SessionHandle {
@@ -44,6 +45,7 @@ impl SessionHandle {
         Arc::new(Self {
             data: RwLock::new(data),
             valid: AtomicBool::new(true),
+            last_validated: Mutex::new(Instant::now()),
         })
     }
     pub fn invalidate(&self) {
@@ -56,9 +58,76 @@ impl SessionHandle {
         self.data.read().await.clone()
     }
     async fn replace(&self, value: SessionData) {
+        let mut last_validated = self.last_validated.lock().await;
         *self.data.write().await = value;
-        self.valid.store(true, Ordering::Release);
+        *last_validated = Instant::now();
     }
+
+    pub async fn revalidate_if_due(
+        &self,
+        cms: &CmsClient,
+        metrics: &Metrics,
+    ) -> Result<(), RevalidationError> {
+        if !self.is_valid() {
+            return Err(RevalidationError::Denied);
+        }
+        // Keep the check and CMS request under one per-session lock. Other
+        // connections, including those with the same username, remain independent.
+        let mut last_validated = self.last_validated.lock().await;
+        let current = self.snapshot().await;
+        let Some(seconds) = current.tenant.revalidate_after_seconds else {
+            return Ok(());
+        };
+        let Some(key) = current.validation_key.as_deref() else {
+            return Ok(());
+        };
+        if last_validated.elapsed() < StdDuration::from_secs(seconds as u64) {
+            return Ok(());
+        }
+        let result = cms
+            .validate(&current.tenant, key, "validation_revalidate")
+            .await;
+        match result {
+            Ok(fresh) => {
+                if !self.is_valid() {
+                    return Err(RevalidationError::Denied);
+                }
+                let outcome = if fresh.assignment_id == current.assignment_id {
+                    "success"
+                } else {
+                    "reassigned"
+                };
+                *self.data.write().await = fresh;
+                *last_validated = Instant::now();
+                metrics
+                    .retry_attempts
+                    .with_label_values(&["session_revalidation", outcome])
+                    .inc();
+                Ok(())
+            }
+            Err(ValidationError::Denied) => {
+                self.invalidate();
+                metrics
+                    .retry_attempts
+                    .with_label_values(&["session_revalidation", "denied"])
+                    .inc();
+                Err(RevalidationError::Denied)
+            }
+            Err(ValidationError::Unavailable(_)) => {
+                metrics
+                    .retry_attempts
+                    .with_label_values(&["session_revalidation", "unavailable"])
+                    .inc();
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RevalidationError {
+    #[error("FTP session denied")]
+    Denied,
 }
 
 #[derive(Clone)]
@@ -99,6 +168,12 @@ impl std::fmt::Debug for UploadService {
 }
 
 impl UploadService {
+    pub async fn revalidate_ftp_session(
+        &self,
+        session: &SessionHandle,
+    ) -> Result<(), RevalidationError> {
+        session.revalidate_if_due(&self.cms, &self.metrics).await
+    }
     pub async fn new(
         pool: PgPool,
         cms: CmsClient,
@@ -818,6 +893,99 @@ mod tests {
         spool::EXPIRED_RECEIPT_RETENTION_DAYS,
     };
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn revalidation_obeys_threshold_and_failures_per_session() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/validate", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let mode = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let response_mode = mode.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 8192];
+                let bytes_read = stream.read(&mut buffer).await.unwrap();
+                assert!(bytes_read > 0);
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let (status, body) = match response_mode.load(Ordering::SeqCst) {
+                    1 => (
+                        "200 OK",
+                        r#"{"assignmentId":"assignment-new","upload":{"accessKeyId":"fake","secretAccessKey":"fake","sessionToken":"fake","region":"local","bucket":"fake","keyPrefix":"assignment-new/","expiresAt":"2099-01-01T00:00:00Z"}}"#,
+                    ),
+                    2 => ("503 Service Unavailable", "{}"),
+                    3 => ("401 Unauthorized", "{}"),
+                    _ => (
+                        "200 OK",
+                        r#"{"assignmentId":"assignment-123","upload":{"accessKeyId":"fake","secretAccessKey":"fake","sessionToken":"fake","region":"local","bucket":"fake","keyPrefix":"assignment-123/","expiresAt":"2099-01-01T00:00:00Z"}}"#,
+                    ),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let metrics = Metrics::new("test").unwrap();
+        let cms = CmsClient::new(metrics.clone()).unwrap();
+        let mut data = session();
+        data.tenant.validation_endpoint = endpoint;
+        data.tenant.revalidate_after_seconds = Some(60);
+        let first = SessionHandle::new(data.clone());
+        let second = SessionHandle::new(data);
+        *first.last_validated.lock().await = Instant::now() - StdDuration::from_secs(10);
+        first.revalidate_if_due(&cms, &metrics).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        *first.last_validated.lock().await = Instant::now() - StdDuration::from_secs(61);
+        first.revalidate_if_due(&cms, &metrics).await.unwrap();
+        first.revalidate_if_due(&cms, &metrics).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(first.snapshot().await.upload.unwrap().access_key_id, "fake");
+        assert_eq!(second.snapshot().await.assignment_id, "assignment-123");
+        mode.store(1, Ordering::SeqCst);
+        *first.last_validated.lock().await = Instant::now() - StdDuration::from_secs(61);
+        first.revalidate_if_due(&cms, &metrics).await.unwrap();
+        assert_eq!(first.snapshot().await.assignment_id, "assignment-new");
+        assert_eq!(second.snapshot().await.assignment_id, "assignment-123");
+        mode.store(2, Ordering::SeqCst);
+        *first.last_validated.lock().await = Instant::now() - StdDuration::from_secs(61);
+        first.revalidate_if_due(&cms, &metrics).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        mode.store(3, Ordering::SeqCst);
+        assert!(first.revalidate_if_due(&cms, &metrics).await.is_err());
+        assert!(!first.is_valid());
+        assert!(first.revalidate_if_due(&cms, &metrics).await.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_and_master_sessions_never_revalidate() {
+        let metrics = Metrics::new("test").unwrap();
+        let cms = CmsClient::new(metrics.clone()).unwrap();
+        let disabled = SessionHandle::new(session());
+        *disabled.last_validated.lock().await = Instant::now() - StdDuration::from_secs(61);
+        disabled.revalidate_if_due(&cms, &metrics).await.unwrap();
+        let mut master_data = session();
+        master_data.tenant.revalidate_after_seconds = Some(1);
+        master_data.validation_key = None;
+        let master = SessionHandle::new(master_data);
+        *master.last_validated.lock().await = Instant::now() - StdDuration::from_secs(61);
+        master.revalidate_if_due(&cms, &metrics).await.unwrap();
+        for result in ["success", "denied", "unavailable", "reassigned"] {
+            assert_eq!(
+                metrics
+                    .retry_attempts
+                    .with_label_values(&["session_revalidation", result])
+                    .get(),
+                0
+            );
+        }
+    }
 
     fn session() -> SessionData {
         SessionData {
@@ -828,6 +996,7 @@ mod tests {
                 api_key: "tenant-api-key".into(),
                 validation_endpoint: "http://example.test/validate".into(),
                 photo_endpoint: "http://example.test/photo".into(),
+                revalidate_after_seconds: None,
             },
             assignment_id: "assignment-123".into(),
             upload: Some(UploadCredentials {

@@ -103,6 +103,11 @@ impl Metrics {
         retry_attempts
             .with_label_values(&["credential_refresh", "success"])
             .inc_by(0);
+        for result in ["success", "denied", "unavailable", "reassigned"] {
+            retry_attempts
+                .with_label_values(&["session_revalidation", result])
+                .inc_by(0);
+        }
         upload_queue_depth.with_label_values(&["s3_upload"]).set(0);
         upload_queue_depth
             .with_label_values(&["cms_callback"])
@@ -221,6 +226,11 @@ mod tests {
         assert!(text.contains("version=\"test-sha\""));
         assert!(text.contains("source=\"ftp\""));
         assert!(text.contains("operation=\"put_object\""));
+        for result in ["success", "denied", "unavailable", "reassigned"] {
+            assert!(text.contains(&format!(
+                "operation=\"session_revalidation\",result=\"{result}\""
+            )));
+        }
         for forbidden in [
             "username",
             "assignment_id",

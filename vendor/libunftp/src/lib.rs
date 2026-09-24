@@ -52,6 +52,12 @@ pub mod storage;
 
 pub use crate::server::ftpserver::{Server, ServerBuilder, error::ServerError, options};
 
+/// Storage backends may attach this to a permission error to close the FTP
+/// control connection after the denial reply has been sent.
+#[derive(Debug, thiserror::Error)]
+#[error("session revoked")]
+pub struct SessionRevoked;
+
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[cfg(not(any(feature = "aws_lc_rs", feature = "ring")))]

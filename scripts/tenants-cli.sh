@@ -144,7 +144,8 @@ view_tenant() {
       ftp_username,
       CASE WHEN api_key IS NULL OR api_key = '' THEN '[missing]' ELSE '[configured]' END AS api_key,
       validation_endpoint,
-      photo_endpoint
+      photo_endpoint,
+      revalidate_after_seconds
     FROM tenants
     WHERE id = $id;
   "
@@ -294,6 +295,25 @@ delete_tenant() {
   echo "Tenant deleted."
 }
 
+set_tenant_revalidation() {
+  local id seconds value
+  read -r -p "Enter tenant id: " id
+  if ! validate_id "$id"; then
+    echo "Tenant id must be a positive integer."
+    return 1
+  fi
+  read -r -p "Revalidate after seconds (empty to clear): " seconds
+  if [[ -z "$seconds" ]]; then
+    value="NULL"
+  elif [[ "$seconds" =~ ^[0-9]+$ ]] && (( seconds > 0 )); then
+    value="$seconds"
+  else
+    echo "Seconds must be a positive integer."
+    return 1
+  fi
+  psql_cmd -v ON_ERROR_STOP=1 -c "UPDATE tenants SET revalidate_after_seconds = $value WHERE id = $id;"
+}
+
 while true; do
   if [[ -t 1 ]] && command -v clear >/dev/null 2>&1; then
     clear
@@ -309,9 +329,10 @@ DB: ${DB_HOST}:${DB_PORT}/${DB_NAME}
 5) Rotate tenant API key
 6) Delete tenant
 7) Exit
+8) Set or clear FTP session revalidation
 EOF
 
-  read -r -p "Select an option [1-7]: " choice
+  read -r -p "Select an option [1-8]: " choice
 
   case "$choice" in
     1)
@@ -341,6 +362,10 @@ EOF
     7)
       echo "Bye."
       exit 0
+      ;;
+    8)
+      set_tenant_revalidation || true
+      pause
       ;;
     *)
       echo "Invalid option."

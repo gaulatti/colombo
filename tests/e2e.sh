@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-cert_dir="$(mktemp -d)"
+cert_dir="$(mktemp -d "$repo_dir/tests/.e2e-certs.XXXXXX")"
 cleanup() {
   docker compose -f "$repo_dir/compose.yaml" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$cert_dir"
@@ -33,6 +33,9 @@ validate_metrics() {
   grep -q 'source="http_upload"' "$metrics_file"
   grep -q 'queue="s3_upload"' "$metrics_file"
   grep -q 'queue="cms_callback"' "$metrics_file"
+  for result in success denied unavailable reassigned; do
+    grep -q "colombo_retry_attempts_total{operation=\"session_revalidation\",result=\"$result\"}" "$metrics_file"
+  done
   ! grep '^colombo_' "$metrics_file" | grep -Eqi \
     '(device_id|username|assignment_id|filename|bucket|url|exception)="'
   grep -E '^(# (HELP|TYPE) colombo_|colombo_)' "$metrics_file" > "$colombo_metrics_file"
@@ -58,7 +61,10 @@ export COLOMBO_FTPS_PRIVATE_KEY_PATH=/certs/key.pem
 export COLOMBO_HTTP_HOST_PORT=18081
 export COLOMBO_FTP_HOST_PORT=12121
 
-docker compose -f "$repo_dir/compose.yaml" up --build --wait
+if ! docker compose -f "$repo_dir/compose.yaml" up --build --wait; then
+  docker compose -f "$repo_dir/compose.yaml" logs --tail=40 colombo >&2
+  exit 1
+fi
 docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
   "INSERT INTO tenants (name, ftp_username, api_key, validation_endpoint, photo_endpoint) VALUES ('Test tenant', 'photographer', 'tenant-api-key', 'http://mocks:18080/validate', 'http://mocks:18080/photo')"
 tenant_list="$(printf '1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
@@ -149,6 +155,14 @@ for _ in $(seq 1 40); do
     echo "$state" | grep -q '"target_filename": "demo/readme-0007.md"'
     echo "$state" | grep -q '"original_filename": "ftp.txt"'
     STATE_JSON="$state" python3 -c 'import collections,json,os; value=json.loads(os.environ["STATE_JSON"]); successes=collections.Counter(value["objects"]); assert all(count == 1 for count in successes.values()); requests=collections.Counter(value["s3_requests"]); assert any(requests[path] > successes[path] for path in successes); attempts=collections.Counter(item["s3_url"] for item in value["callback_attempts"]); assert any(count > 1 for count in attempts.values())'
+    python3 "$repo_dir/tests/ftp_revalidation.py" --null
+    docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
+      'UPDATE tenants SET revalidate_after_seconds = 1 WHERE ftp_username = '\''photographer'\'''
+    python3 "$repo_dir/tests/ftp_revalidation.py"
+    printf '8\n1\n\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli >/dev/null
+    test "$(docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -t -A -c 'SELECT revalidate_after_seconds IS NULL FROM tenants WHERE id = 1')" = t
+    printf '8\n1\n60\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli >/dev/null
+    test "$(docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -t -A -c 'SELECT revalidate_after_seconds FROM tenants WHERE id = 1')" = 60
     validate_metrics
     exit 0
   fi
