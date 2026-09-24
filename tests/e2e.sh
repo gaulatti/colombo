@@ -293,6 +293,7 @@ for _ in $(seq 1 40); do
     docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
       'UPDATE tenants SET revalidate_after_seconds = 1 WHERE ftp_username = '\''photographer'\'''
     python3 "$repo_dir/tests/ftp_revalidation.py"
+    mock_control '{"validation_assignment":"assignment-123"}'
     printf '8\n1\n\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli >/dev/null
     test "$(docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -t -A -c 'SELECT revalidate_after_seconds IS NULL FROM tenants WHERE id = 1')" = t
     printf '8\n1\n60\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli >/dev/null
