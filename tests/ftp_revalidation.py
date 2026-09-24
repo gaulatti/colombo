@@ -42,6 +42,14 @@ def stor(ftp, name):
     ftp.storbinary(f"STOR {name}", io.BytesIO(b"revalidation-test"))
 
 
+def spool_count():
+    result = subprocess.check_output(COMPOSE[:-1] + [
+        "colombo", "sh", "-c",
+        "find /var/lib/colombo/spool/operations -mindepth 1 -maxdepth 1 -type d | wc -l",
+    ])
+    return int(result.strip())
+
+
 def main():
     # The caller sets a one-second tenant threshold so this boundary test runs
     # quickly. Null-column behavior is verified before this script runs.
@@ -71,6 +79,7 @@ def main():
 
     time.sleep(1.1)
     control(validation_mode="denied")
+    before_denial = spool_count()
     try:
         stor(first, "revalidation-denied.txt")
     except ftplib.error_perm:
@@ -86,6 +95,7 @@ def main():
     else:
         raise AssertionError("evicted session accepted STOR")
     assert state()["validation_requests"] == denied_count
+    assert spool_count() == before_denial
     first.close()
     second.close()
 
