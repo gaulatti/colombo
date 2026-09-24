@@ -52,7 +52,7 @@ impl Metrics {
         )?;
         let retry_attempts = IntCounterVec::new(
             Opts::new("colombo_retry_attempts_total", "Upload retry attempts"),
-            &["kind", "result"],
+            &["operation", "result"],
         )?;
         let ftp_sessions = IntGauge::new(
             "colombo_ftp_sessions_active",
@@ -228,7 +228,7 @@ mod tests {
         assert!(text.contains("operation=\"put_object\""));
         for result in ["success", "denied", "unavailable", "reassigned"] {
             assert!(text.contains(&format!(
-                "kind=\"session_revalidation\",result=\"{result}\""
+                "operation=\"session_revalidation\",result=\"{result}\""
             )));
         }
         for forbidden in [

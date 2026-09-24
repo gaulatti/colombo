@@ -34,7 +34,7 @@ validate_metrics() {
   grep -q 'queue="s3_upload"' "$metrics_file"
   grep -q 'queue="cms_callback"' "$metrics_file"
   for result in success denied unavailable reassigned; do
-    grep -q "colombo_retry_attempts_total{kind=\"session_revalidation\",result=\"$result\"}" "$metrics_file"
+    grep -q "colombo_retry_attempts_total{operation=\"session_revalidation\",result=\"$result\"}" "$metrics_file"
   done
   ! grep '^colombo_' "$metrics_file" | grep -Eqi \
     '(device_id|username|assignment_id|filename|bucket|url|exception)="'
