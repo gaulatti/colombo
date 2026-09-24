@@ -19,13 +19,13 @@ pub async fn tenant_by_username(
     username: &str,
 ) -> Result<Option<Tenant>, sqlx::Error> {
     sqlx::query_as::<_, Tenant>(
-        "SELECT id, name, ftp_username, api_key, validation_endpoint, photo_endpoint, revalidate_after_seconds FROM tenants WHERE ftp_username = $1"
+        "SELECT id, name, ftp_username, api_key, validation_endpoint, photo_endpoint, revalidate_after_seconds, login_failures_per_minute FROM tenants WHERE ftp_username = $1"
     ).bind(username).fetch_optional(pool).await
 }
 
 pub async fn tenant_by_id(pool: &PgPool, id: i64) -> Result<Option<Tenant>, sqlx::Error> {
     sqlx::query_as::<_, Tenant>(
-        "SELECT id, name, ftp_username, api_key, validation_endpoint, photo_endpoint, revalidate_after_seconds FROM tenants WHERE id = $1"
+        "SELECT id, name, ftp_username, api_key, validation_endpoint, photo_endpoint, revalidate_after_seconds, login_failures_per_minute FROM tenants WHERE id = $1"
     ).bind(id).fetch_optional(pool).await
 }
 

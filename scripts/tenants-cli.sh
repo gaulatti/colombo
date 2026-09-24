@@ -145,7 +145,8 @@ view_tenant() {
       CASE WHEN api_key IS NULL OR api_key = '' THEN '[missing]' ELSE '[configured]' END AS api_key,
       validation_endpoint,
       photo_endpoint,
-      revalidate_after_seconds
+      revalidate_after_seconds,
+      COALESCE(login_failures_per_minute::text, '[off]') AS login_failures_per_minute
     FROM tenants
     WHERE id = $id;
   "
@@ -185,7 +186,7 @@ create_tenant() {
 }
 
 update_tenant() {
-  local id row
+  local id row current_limit entered_limit sql_limit
   read -r -p "Enter tenant id to update: " id
   if ! validate_id "$id"; then
     echo "Tenant id must be a positive integer."
@@ -209,6 +210,7 @@ update_tenant() {
   fi
 
   IFS=$'\t' read -r cur_name cur_ftp_username cur_api_key cur_validation_endpoint cur_photo_endpoint <<< "$row"
+  current_limit="$(psql_cmd -t -A -c "SELECT COALESCE(login_failures_per_minute::text, '[off]') FROM tenants WHERE id = $id;")"
 
   echo "Update tenant id=$id (press Enter to keep current value)"
   echo "Current API key: [configured]"
@@ -217,6 +219,17 @@ update_tenant() {
   ftp_username="$(prompt_with_default "FTP username" "$cur_ftp_username")"
   validation_endpoint="$(prompt_with_default "Validation endpoint" "$cur_validation_endpoint")"
   photo_endpoint="$(prompt_with_default "Photo endpoint" "$cur_photo_endpoint")"
+  read -r -p "Failed logins per minute [$current_limit] (number, off, or Enter to keep): " entered_limit
+  if [[ -z "$entered_limit" ]]; then
+    sql_limit="$( [[ "$current_limit" == '[off]' ]] && printf NULL || printf '%s' "$current_limit" )"
+  elif [[ "$entered_limit" == "off" ]]; then
+    sql_limit=NULL
+  elif [[ "$entered_limit" =~ ^[1-9][0-9]*$ ]] && (( ${#entered_limit} < 10 || entered_limit <= 2147483647 )); then
+    sql_limit="$entered_limit"
+  else
+    echo "Failed logins per minute must be a positive integer or off."
+    return 1
+  fi
 
   psql_cmd -v ON_ERROR_STOP=1 \
     -c "
@@ -226,7 +239,8 @@ update_tenant() {
         ftp_username = $(sql_quote "$ftp_username"),
         api_key = $(sql_quote "$cur_api_key"),
         validation_endpoint = $(sql_quote "$validation_endpoint"),
-        photo_endpoint = $(sql_quote "$photo_endpoint")
+        photo_endpoint = $(sql_quote "$photo_endpoint"),
+        login_failures_per_minute = $sql_limit
       WHERE id = $id;
     "
   echo "Tenant updated."

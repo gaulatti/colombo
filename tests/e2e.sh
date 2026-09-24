@@ -86,6 +86,69 @@ PY
   exit 1
 }
 
+validation_count() {
+  mock_state | python3 -c 'import json,sys; print(json.load(sys.stdin)["validation_attempts"])'
+}
+
+verify_login_throttle() {
+  local before after status
+  before="$(validation_count)"
+  for _ in $(seq 1 12); do
+    test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
+  done
+  after="$(validation_count)"
+  test "$((after - before))" = 12
+
+  docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
+    'UPDATE tenants SET login_failures_per_minute = 10 WHERE ftp_username = '\''photographer'\'';'
+  before="$(validation_count)"
+  for _ in $(seq 1 10); do
+    test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
+  done
+  status="$(curl -sS -D "$cert_dir/throttle-headers" -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")"
+  test "$status" = 429
+  grep -qi '^retry-after: [1-9][0-9]*' "$cert_dir/throttle-headers"
+  after="$(validation_count)"
+  test "$((after - before))" = 10
+  curl -fsS -H 'Authorization: Bearer local-metrics-token' http://127.0.0.1:18081/actuator/prometheus | grep -q 'colombo_authentication_attempts_total{result="throttled",source="http_status"} 1'
+
+  # Removing the optional setting disables throttling immediately.
+  docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
+    'UPDATE tenants SET login_failures_per_minute = NULL WHERE ftp_username = '\''photographer'\'';'
+  test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
+  test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' "http://127.0.0.1:18081/uploads/$operation_id")" = 200
+
+  docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
+    'UPDATE tenants SET login_failures_per_minute = 10 WHERE ftp_username = '\''photographer'\'';'
+  for _ in $(seq 1 5); do
+    test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
+  done
+  test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' "http://127.0.0.1:18081/uploads/$operation_id")" = 200
+  for _ in $(seq 1 6); do
+    test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
+  done
+  test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' "http://127.0.0.1:18081/uploads/$operation_id")" = 200
+
+  docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
+    'UPDATE tenants SET login_failures_per_minute = 1 WHERE ftp_username = '\''photographer'\'';'
+  before="$(validation_count)"
+  python3 - <<'PY'
+from ftplib import FTP, error_perm
+for _ in range(2):
+    with FTP() as ftp:
+        ftp.connect('127.0.0.1', 12121)
+        try:
+            ftp.login('photographer', 'wrong')
+        except error_perm as exc:
+            assert str(exc).startswith('530')
+        else:
+            raise AssertionError('invalid FTP login succeeded')
+PY
+  after="$(validation_count)"
+  test "$((after - before))" = 1
+  curl -fsS -H 'Authorization: Bearer local-metrics-token' http://127.0.0.1:18081/actuator/prometheus | grep -q 'colombo_authentication_attempts_total{result="throttled",source="ftp"} 1'
+}
+
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
   -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1
 export COLOMBO_TEST_CERT_DIR="$cert_dir"
@@ -105,6 +168,15 @@ echo "$tenant_list" | grep -q photographer
 tenant_view="$(printf '2\n1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
 echo "$tenant_view" | grep -q '\[configured\]'
 ! echo "$tenant_view" | grep -q 'tenant-api-key'
+echo "$tenant_view" | grep -q 'login_failures_per_minute'
+tenant_update="$(printf '4\n1\n\n\n\n\n10\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
+echo "$tenant_update" | grep -q 'Tenant updated.'
+test "$(docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -t -A -c "SELECT login_failures_per_minute FROM tenants WHERE id = 1")" = 10
+tenant_view="$(printf '2\n1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
+echo "$tenant_view" | grep -q '10'
+tenant_update="$(printf '4\n1\n\n\n\n\noff\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"
+echo "$tenant_update" | grep -q 'Tenant updated.'
+test "$(docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -t -A -c "SELECT login_failures_per_minute IS NULL FROM tenants WHERE id = 1")" = t
 
 test "$(curl -fsS http://127.0.0.1:18081/actuator/health)" = '{"status":"UP"}'
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" = 302
@@ -343,3 +415,4 @@ python3 -c 'import json,sys; assert json.load(sys.stdin)["state"] == "held"' <<<
 state="$(mock_state)"
 STATE_JSON="$state" RESTART_ID="$restart_id" python3 -c 'import json,os; s=json.loads(os.environ["STATE_JSON"]); i=os.environ["RESTART_ID"]; assert i in s["wanderers"]; assert s["wanderer_registration_attempts"].count(i) >= 2'
 validate_metrics false
+verify_login_throttle

@@ -4,6 +4,7 @@ pub mod db;
 pub mod domain;
 pub mod ftp;
 pub mod http;
+pub mod login_throttle;
 pub mod metrics;
 pub mod naming;
 pub mod spool;

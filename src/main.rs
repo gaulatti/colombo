@@ -6,6 +6,7 @@ use colombo::{
     config::Config,
     db, ftp,
     http::{self, AppState},
+    login_throttle::LoginThrottle,
     metrics::Metrics,
     upload::UploadService,
 };
@@ -35,6 +36,7 @@ async fn run() -> Result<()> {
         .await
         .context("database startup failed")?;
     let metrics = Metrics::new(&config.build_version)?;
+    let throttle = Arc::new(LoginThrottle::default());
     let cms = CmsClient::new(metrics.clone())?;
     let uploads = UploadService::new(
         pool.clone(),
@@ -50,11 +52,12 @@ async fn run() -> Result<()> {
         uploads: uploads.clone(),
         metrics: metrics.clone(),
         metrics_token: Arc::from(config.metrics_token.clone().unwrap_or_default()),
+        throttle: throttle.clone(),
     };
     if config.ftp_enabled {
         tokio::try_join!(
             http::serve(config.http_port, state),
-            ftp::serve(config, pool, cms, uploads, metrics)
+            ftp::serve(config, pool, cms, uploads, metrics, throttle)
         )?;
     } else {
         http::serve(config.http_port, state).await?;

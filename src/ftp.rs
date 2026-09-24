@@ -25,6 +25,7 @@ use crate::{
     config::Config,
     db,
     domain::SessionData,
+    login_throttle::LoginThrottle,
     metrics::Metrics,
     upload::{SessionHandle, UploadService},
 };
@@ -69,6 +70,7 @@ struct FtpAuth {
     master_password: Option<String>,
     pending: Arc<DashMap<String, ColomboUser>>,
     metrics: Arc<Metrics>,
+    throttle: Arc<LoginThrottle>,
 }
 
 impl Debug for FtpAuth {
@@ -111,6 +113,18 @@ impl Authenticator for FtpAuth {
                 return Err(AuthenticationError::new("tenant lookup failed"));
             }
         };
+        let source_ip = creds.source_ip;
+        if self
+            .throttle
+            .retry_after(tenant.id, source_ip, tenant.login_failures_per_minute)
+            .is_some()
+        {
+            self.metrics
+                .authentication_attempts
+                .with_label_values(&["ftp", "throttled"])
+                .inc();
+            return Err(AuthenticationError::BadPassword);
+        }
         let session = if self
             .master_password
             .as_deref()
@@ -136,6 +150,8 @@ impl Authenticator for FtpAuth {
             {
                 Ok(value) => value,
                 Err(ValidationError::Denied) => {
+                    self.throttle
+                        .denied(tenant.id, source_ip, tenant.login_failures_per_minute);
                     self.metrics
                         .authentication_attempts
                         .with_label_values(&["ftp", "denied"])
@@ -151,6 +167,7 @@ impl Authenticator for FtpAuth {
                 }
             }
         };
+        self.throttle.success(session.tenant.id, source_ip);
         if self.master_password.as_deref() != Some(password) {
             self.metrics
                 .authentication_attempts
@@ -417,6 +434,7 @@ pub async fn serve(
     cms: CmsClient,
     uploads: Arc<UploadService>,
     metrics: Arc<Metrics>,
+    throttle: Arc<LoginThrottle>,
 ) -> anyhow::Result<()> {
     let pending = Arc::new(DashMap::new());
     let root = config.ftp_root.clone();
@@ -427,6 +445,7 @@ pub async fn serve(
         master_password: config.master_password.clone(),
         pending: pending.clone(),
         metrics: metrics.clone(),
+        throttle,
     });
     let provider = Arc::new(UserProvider { pending, metrics });
     let mut builder = ServerBuilder::new(Box::new(move || {

@@ -1237,6 +1237,7 @@ mod tests {
                 validation_endpoint: "http://example.test/validate".into(),
                 photo_endpoint: "http://example.test/photo".into(),
                 revalidate_after_seconds: None,
+                login_failures_per_minute: None,
             },
             assignment_id: "assignment-123".into(),
             upload: Some(UploadCredentials {

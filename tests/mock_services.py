@@ -3,6 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {
+    "validation_attempts": 0,
     "callback_attempts": [],
     "callbacks": [],
     "hold_s3": False,
@@ -71,6 +72,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["validation_requests"] += 1
                 validation_mode = STATE["validation_mode"]
                 validation_assignment = STATE["validation_assignment"]
+                STATE["validation_attempts"] += 1
             if validation_mode == "unavailable":
                 return self._json(503, {})
             if validation_mode == "denied":

@@ -11,6 +11,7 @@ pub struct Tenant {
     pub validation_endpoint: String,
     pub photo_endpoint: String,
     pub revalidate_after_seconds: Option<i32>,
+    pub login_failures_per_minute: Option<i32>,
 }
 
 impl std::fmt::Debug for Tenant {

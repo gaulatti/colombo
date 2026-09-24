@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -6,7 +7,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -21,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     cms::{CmsClient, ValidationError},
     db,
+    login_throttle::LoginThrottle,
     metrics::Metrics,
     spool::UploadState,
     upload::UploadService,
@@ -35,6 +37,7 @@ pub struct AppState {
     pub uploads: Arc<UploadService>,
     pub metrics: Arc<Metrics>,
     pub metrics_token: Arc<str>,
+    pub throttle: Arc<LoginThrottle>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -65,9 +68,12 @@ async fn root() -> Response {
 pub async fn serve(port: u16, state: AppState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(port, "HTTP listener ready");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -84,6 +90,7 @@ struct Accepted {
 
 async fn upload(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
@@ -113,12 +120,25 @@ async fn upload(
             return error(StatusCode::INTERNAL_SERVER_ERROR, "Tenant lookup failed");
         }
     };
+    if let Some(seconds) =
+        state
+            .throttle
+            .retry_after(tenant.id, peer.ip(), tenant.login_failures_per_minute)
+    {
+        state
+            .metrics
+            .authentication_attempts
+            .with_label_values(&["http_upload", "throttled"])
+            .inc();
+        return throttled(seconds);
+    }
     let session = match state
         .cms
         .validate(&tenant, &password, "validation_upload")
         .await
     {
         Ok(value) => {
+            state.throttle.success(tenant.id, peer.ip());
             state
                 .metrics
                 .authentication_attempts
@@ -127,6 +147,9 @@ async fn upload(
             value
         }
         Err(ValidationError::Denied) => {
+            state
+                .throttle
+                .denied(tenant.id, peer.ip(), tenant.login_failures_per_minute);
             state
                 .metrics
                 .authentication_attempts
@@ -261,6 +284,7 @@ async fn upload(
 
 async fn upload_status(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(operation_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -286,13 +310,31 @@ async fn upload_status(
             return error(StatusCode::INTERNAL_SERVER_ERROR, "Tenant lookup failed");
         }
     };
+    if let Some(seconds) =
+        state
+            .throttle
+            .retry_after(tenant.id, peer.ip(), tenant.login_failures_per_minute)
+    {
+        state
+            .metrics
+            .authentication_attempts
+            .with_label_values(&["http_status", "throttled"])
+            .inc();
+        return throttled(seconds);
+    }
     let authenticated = match state
         .cms
         .validate(&tenant, &password, "validation_status")
         .await
     {
-        Ok(value) => value,
+        Ok(value) => {
+            state.throttle.success(tenant.id, peer.ip());
+            value
+        }
         Err(ValidationError::Denied) => {
+            state
+                .throttle
+                .denied(tenant.id, peer.ip(), tenant.login_failures_per_minute);
             return error(StatusCode::UNAUTHORIZED, "Invalid credentials");
         }
         Err(err) => {
@@ -339,6 +381,17 @@ struct ErrorBody<'a> {
 }
 fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(ErrorBody { error: message })).into_response()
+}
+
+fn throttled(seconds: u64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, seconds.to_string())],
+        Json(ErrorBody {
+            error: "Too many failed logins",
+        }),
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<AppState>) -> Response {
