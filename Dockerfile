@@ -2,12 +2,13 @@ FROM rust:1.98-alpine AS builder
 RUN apk add --no-cache clang cmake make musl-dev perl
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 COPY migrations ./migrations
 COPY vendor ./vendor
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --locked --release && cp /build/target/release/colombo /tmp/colombo
+    touch src/db.rs && cargo build --locked --release && cp /build/target/release/colombo /tmp/colombo
 
 FROM alpine:3.22
 RUN apk add --no-cache bash ca-certificates curl postgresql-client

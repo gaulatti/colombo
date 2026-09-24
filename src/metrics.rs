@@ -175,6 +175,14 @@ mod tests {
             .authentication_attempts
             .with_label_values(&["ftp", "success"])
             .inc();
+        metrics
+            .authentication_attempts
+            .with_label_values(&["ftp", "throttled"])
+            .inc();
+        metrics
+            .authentication_attempts
+            .with_label_values(&["http_upload", "throttled"])
+            .inc();
         metrics.ftp_sessions.set(0);
         metrics
             .upload_queue_depth
@@ -220,6 +228,12 @@ mod tests {
         assert!(text.contains("service=\"colombo\""));
         assert!(text.contains("version=\"test-sha\""));
         assert!(text.contains("source=\"ftp\""));
+        assert!(text.contains(
+            "colombo_authentication_attempts_total{result=\"throttled\",source=\"ftp\"} 1"
+        ));
+        assert!(text.contains(
+            "colombo_authentication_attempts_total{result=\"throttled\",source=\"http_upload\"} 1"
+        ));
         assert!(text.contains("operation=\"put_object\""));
         for forbidden in [
             "username",

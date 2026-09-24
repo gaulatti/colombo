@@ -3,6 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {
+    "validation_attempts": 0,
     "callback_attempts": [],
     "callbacks": [],
     "hold_s3": False,
@@ -47,6 +48,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATE_CHANGED.notify_all()
             return self._json(200, {"status": "updated"})
         if self.path == "/validate":
+            with STATE_CHANGED:
+                STATE["validation_attempts"] += 1
             if self.headers.get("X-Colombo-API-Key") != "tenant-api-key" or body.get(
                 "key"
             ) not in ("secret", "naming", "other-assignment"):

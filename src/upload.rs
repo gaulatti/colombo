@@ -828,6 +828,7 @@ mod tests {
                 api_key: "tenant-api-key".into(),
                 validation_endpoint: "http://example.test/validate".into(),
                 photo_endpoint: "http://example.test/photo".into(),
+                login_failures_per_minute: None,
             },
             assignment_id: "assignment-123".into(),
             upload: Some(UploadCredentials {
