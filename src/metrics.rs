@@ -19,6 +19,7 @@ pub struct Metrics {
     pub upload_active: IntGaugeVec,
     pub spool_operations: IntGaugeVec,
     pub spool_oldest_age: GaugeVec,
+    pub oldest_wandering_age: prometheus::Gauge,
     pub spool_outcomes: IntCounterVec,
 }
 
@@ -83,6 +84,10 @@ impl Metrics {
             ),
             &["state"],
         )?;
+        let oldest_wandering_age = prometheus::Gauge::new(
+            "colombo_upload_spool_oldest_wandering_age_seconds",
+            "Age of the oldest wandering upload operation",
+        )?;
         let spool_outcomes = IntCounterVec::new(
             Opts::new(
                 "colombo_upload_spool_outcomes_total",
@@ -118,6 +123,8 @@ impl Metrics {
             "accepted",
             "uploading",
             "delivered",
+            "wandering",
+            "held",
             "callback_confirmed",
             "failed",
             "expired",
@@ -139,6 +146,7 @@ impl Metrics {
         registry.register(Box::new(upload_active.clone()))?;
         registry.register(Box::new(spool_operations.clone()))?;
         registry.register(Box::new(spool_oldest_age.clone()))?;
+        registry.register(Box::new(oldest_wandering_age.clone()))?;
         registry.register(Box::new(spool_outcomes.clone()))?;
         let build = IntGaugeVec::new(
             Opts::new("colombo_build_identity", "Running Colombo build identity"),
@@ -158,6 +166,7 @@ impl Metrics {
             upload_active,
             spool_operations,
             spool_oldest_age,
+            oldest_wandering_age,
             spool_outcomes,
         }))
     }
@@ -218,6 +227,7 @@ mod tests {
             "colombo_retry_attempts_total",
             "colombo_upload_spool_operations",
             "colombo_upload_spool_oldest_age_seconds",
+            "colombo_upload_spool_oldest_wandering_age_seconds",
             "colombo_upload_spool_outcomes_total",
         ] {
             assert!(text.contains(family), "missing {family}");

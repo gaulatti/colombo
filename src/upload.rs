@@ -7,7 +7,7 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use aws_credential_types::{Credentials, provider::SharedCredentialsProvider};
 use aws_sdk_s3::{Client, error::ProvideErrorMetadata, primitives::ByteStream};
 use chrono::{Duration, Utc};
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    cms::{CallbackOutcome, CmsClient, ValidationError},
+    cms::{CallbackOutcome, CmsClient, DeliveryError, ValidationError},
     db,
     domain::SessionData,
     metrics::Metrics,
@@ -26,7 +26,7 @@ use crate::{
     spool::{
         CALLBACK_ATTEMPT_LIMIT, CONFIRMED_RETENTION_DAYS, FAILED_RETENTION_DAYS, FailureCode,
         PrivateUploadContext, SourceProtocol, Spool, UPLOAD_ATTEMPT_LIMIT, UploadReceipt,
-        UploadRecord, UploadState,
+        UploadRecord, UploadState, WandererReason,
     },
 };
 
@@ -358,12 +358,14 @@ impl UploadService {
             UploadState::Accepted,
             UploadState::Uploading,
             UploadState::Delivered,
+            UploadState::Wandering,
+            UploadState::Held,
             UploadState::CallbackConfirmed,
             UploadState::Failed,
             UploadState::Expired,
         ];
-        let mut counts = [0_i64; 6];
-        let mut oldest = [0_f64; 6];
+        let mut counts = [0_i64; 8];
+        let mut oldest = [0_f64; 8];
         let mut s3_queued = 0_i64;
         let mut callback_queued = 0_i64;
         for record in &records {
@@ -380,7 +382,7 @@ impl UploadService {
             );
             match record.state {
                 UploadState::Accepted | UploadState::Uploading => s3_queued += 1,
-                UploadState::Delivered => callback_queued += 1,
+                UploadState::Delivered | UploadState::Wandering => callback_queued += 1,
                 _ => {}
             }
             if record.due(now) {
@@ -414,6 +416,7 @@ impl UploadService {
             .upload_queue_depth
             .with_label_values(&["cms_callback"])
             .set(callback_queued);
+        self.metrics.oldest_wandering_age.set(oldest[3]);
         Ok(())
     }
 
@@ -442,10 +445,26 @@ impl UploadService {
         let mut session = SessionData {
             tenant,
             assignment_id: record.assignment_id.clone(),
+            device_id: record.device_id.clone(),
             upload: Some(private.upload.clone()),
             validation_key: private.validation_key.clone(),
         };
         let mut private = private;
+
+        if record.state == UploadState::Wandering {
+            if Utc::now() >= record.accepted_at + Duration::days(FAILED_RETENTION_DAYS) {
+                self.fail(&mut record, FailureCode::RetryExhausted).await?;
+                return Ok(());
+            }
+            self.deliver_wanderer(&mut record, &session).await?;
+            return Ok(());
+        }
+        if self.late_enabled(&session) && Utc::now() >= record.accepted_at + Duration::hours(48) {
+            self.start_wandering(&mut record, WandererReason::DeadlineExceeded)
+                .await?;
+            self.deliver_wanderer(&mut record, &session).await?;
+            return Ok(());
+        }
 
         if matches!(record.state, UploadState::Accepted | UploadState::Uploading) {
             let spool = self.spool.clone();
@@ -491,10 +510,7 @@ impl UploadService {
             .map_err(StageFailure::Transient)?;
 
         if record.target_filename.is_none() {
-            let target = self
-                .resolve_target(record, session)
-                .await
-                .map_err(StageFailure::Transient)?;
+            let target = self.resolve_target(record, session).await?;
             let credentials = session.upload.as_ref().ok_or(StageFailure::Invalid)?;
             let key = if credentials.key_prefix.ends_with('/') {
                 format!("{}{}", credentials.key_prefix, target)
@@ -518,48 +534,81 @@ impl UploadService {
                 .retry_attempts
                 .with_label_values(&["credential_refresh", "started"])
                 .inc();
-            let key = private
-                .validation_key
-                .as_deref()
-                .ok_or(StageFailure::Denied)?;
-            match self
-                .cms
-                .validate(&session.tenant, key, "validation_refresh")
-                .await
+            if session
+                .upload
+                .as_ref()
+                .and_then(|u| u.credentials_endpoint.as_ref())
+                .is_some()
             {
-                Ok(fresh) if fresh.assignment_id == record.assignment_id => {
-                    self.metrics
-                        .retry_attempts
-                        .with_label_values(&["credential_refresh", "success"])
-                        .inc();
-                    let fresh_upload = fresh.upload.clone().ok_or(StageFailure::Invalid)?;
-                    private.upload = fresh_upload;
-                    self.spool
-                        .save_private(record.operation_id, private)
-                        .map_err(StageFailure::Transient)?;
-                    *session = fresh;
-                    if let Some(handle) = self
-                        .session_handles
-                        .get(&record.operation_id)
-                        .and_then(|value| value.upgrade())
-                    {
-                        handle.replace(session.clone()).await;
+                match self
+                    .cms
+                    .refresh_credentials(session, record.accepted_at)
+                    .await
+                {
+                    Ok(fresh_upload) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "success"])
+                            .inc();
+                        private.upload = fresh_upload.clone();
+                        self.spool
+                            .save_private(record.operation_id, private)
+                            .map_err(StageFailure::Transient)?;
+                        session.upload = Some(fresh_upload);
+                        result = self.put_attempt(record, session).await;
                     }
-                    result = self.put_attempt(record, session).await;
+                    Err(DeliveryError::Denied(reason)) => {
+                        return Err(StageFailure::CmsDenied(reason));
+                    }
+                    Err(DeliveryError::Unavailable(error)) => {
+                        return Err(StageFailure::CmsUnavailable(error));
+                    }
+                    Err(DeliveryError::Invalid(_)) => return Err(StageFailure::Invalid),
                 }
-                Ok(_) | Err(ValidationError::Denied) => {
-                    self.metrics
-                        .retry_attempts
-                        .with_label_values(&["credential_refresh", "denied"])
-                        .inc();
-                    return Err(StageFailure::Denied);
-                }
-                Err(ValidationError::Unavailable(error)) => {
-                    self.metrics
-                        .retry_attempts
-                        .with_label_values(&["credential_refresh", "unavailable"])
-                        .inc();
-                    return Err(StageFailure::Transient(error));
+            } else {
+                let key = private
+                    .validation_key
+                    .as_deref()
+                    .ok_or(StageFailure::Denied)?;
+                match self
+                    .cms
+                    .validate(&session.tenant, key, "validation_refresh")
+                    .await
+                {
+                    Ok(fresh) if fresh.assignment_id == record.assignment_id => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "success"])
+                            .inc();
+                        let fresh_upload = fresh.upload.clone().ok_or(StageFailure::Invalid)?;
+                        private.upload = fresh_upload;
+                        self.spool
+                            .save_private(record.operation_id, private)
+                            .map_err(StageFailure::Transient)?;
+                        *session = fresh;
+                        if let Some(handle) = self
+                            .session_handles
+                            .get(&record.operation_id)
+                            .and_then(|value| value.upgrade())
+                        {
+                            handle.replace(session.clone()).await;
+                        }
+                        result = self.put_attempt(record, session).await;
+                    }
+                    Ok(_) | Err(ValidationError::Denied) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "denied"])
+                            .inc();
+                        return Err(StageFailure::Denied);
+                    }
+                    Err(ValidationError::Unavailable(error)) => {
+                        self.metrics
+                            .retry_attempts
+                            .with_label_values(&["credential_refresh", "unavailable"])
+                            .inc();
+                        return Err(StageFailure::CmsUnavailable(error));
+                    }
                 }
             }
         }
@@ -595,16 +644,30 @@ impl UploadService {
         }
     }
 
-    async fn resolve_target(&self, record: &UploadRecord, session: &SessionData) -> Result<String> {
-        let credentials = session
-            .upload
-            .as_ref()
-            .context("upload credentials missing")?;
+    async fn resolve_target(
+        &self,
+        record: &UploadRecord,
+        session: &SessionData,
+    ) -> std::result::Result<String, StageFailure> {
+        let credentials = session.upload.as_ref().ok_or(StageFailure::Invalid)?;
         if let Some(policy) = &credentials.naming_policy {
             if !policy.valid() {
-                bail!("invalid upload naming policy");
+                return Err(StageFailure::Invalid);
             }
-            let sequence = self.cms.next_sequence(session).await?;
+            let sequence = self
+                .cms
+                .next_sequence(session, record.accepted_at)
+                .await
+                .map_err(|e| match e {
+                    DeliveryError::Denied(reason) if self.late_enabled(session) => {
+                        StageFailure::CmsDenied(reason)
+                    }
+                    DeliveryError::Denied(_) => {
+                        StageFailure::Transient(anyhow!("CMS sequence denied"))
+                    }
+                    DeliveryError::Unavailable(error) => StageFailure::CmsUnavailable(error),
+                    DeliveryError::Invalid(error) => StageFailure::Transient(error),
+                })?;
             naming::render(
                 policy,
                 &session.assignment_id,
@@ -613,6 +676,7 @@ impl UploadService {
                 Utc::now(),
                 sequence,
             )
+            .map_err(StageFailure::Transient)
         } else {
             Ok(record.original_filename.clone())
         }
@@ -665,6 +729,29 @@ impl UploadService {
         failure: StageFailure,
     ) -> Result<()> {
         match failure {
+            StageFailure::CmsDenied(reason) if self.has_wanderers(record) => {
+                self.start_wandering(record, reason).await
+            }
+            StageFailure::CmsUnavailable(error) if self.has_wanderers(record) => {
+                warn!(operation_id = %record.operation_id, error = %error, "CMS unavailable; upload rescheduled");
+                record.upload_attempts = record.upload_attempts.saturating_sub(1);
+                record.state = UploadState::Accepted;
+                record.next_attempt_at = Utc::now() + Duration::minutes(5);
+                self.spool.save_record(record)
+            }
+            StageFailure::CmsDenied(_) => self.fail(record, FailureCode::DependencyDenied).await,
+            StageFailure::CmsUnavailable(error)
+                if record.upload_attempts >= UPLOAD_ATTEMPT_LIMIT =>
+            {
+                warn!(operation_id = %record.operation_id, error = %error, "CMS retry budget exhausted");
+                self.fail(record, FailureCode::RetryExhausted).await
+            }
+            StageFailure::CmsUnavailable(error) => {
+                warn!(operation_id = %record.operation_id, error = %error, "CMS delivery will retry");
+                record.state = UploadState::Accepted;
+                record.next_attempt_at = Utc::now() + retry_delay(record.upload_attempts);
+                self.spool.save_record(record)
+            }
             StageFailure::Denied => self.fail(record, FailureCode::DependencyDenied).await,
             StageFailure::Invalid => self.fail(record, FailureCode::InvalidMetadata).await,
             StageFailure::Transient(error) if record.upload_attempts >= UPLOAD_ATTEMPT_LIMIT => {
@@ -705,7 +792,14 @@ impl UploadService {
         let active = self.begin_work("cms_callback", &self.callback_slots).await;
         let result = self
             .cms
-            .photo_callback(session, s3_url, &record.original_filename, target)
+            .photo_callback(
+                session,
+                s3_url,
+                &record.original_filename,
+                target,
+                record.accepted_at,
+                record.device_id.as_deref(),
+            )
             .await;
         drop(active);
         match result {
@@ -730,7 +824,18 @@ impl UploadService {
                 info!(operation_id = %record.operation_id, "CMS callback confirmation persisted");
                 Ok(())
             }
-            Ok(CallbackOutcome::Denied) => self.fail(record, FailureCode::DependencyDenied).await,
+            Err(DeliveryError::Denied(reason)) if self.late_enabled(session) => {
+                self.start_wandering(record, reason).await
+            }
+            Err(DeliveryError::Denied(_)) => self.fail(record, FailureCode::DependencyDenied).await,
+            Err(DeliveryError::Unavailable(error)) if self.late_enabled(session) => {
+                record.callback_attempts = record.callback_attempts.saturating_sub(1);
+                record.next_attempt_at = Utc::now() + Duration::minutes(5);
+                self.spool.save_record(record)?;
+                warn!(operation_id = %record.operation_id, error = %error, "CMS unavailable; callback rescheduled");
+                Ok(())
+            }
+            Err(DeliveryError::Invalid(_)) => self.fail(record, FailureCode::InvalidMetadata).await,
             Err(error) if record.callback_attempts >= CALLBACK_ATTEMPT_LIMIT => {
                 warn!(operation_id = %record.operation_id, error = %error, "callback retry budget exhausted");
                 self.fail(record, FailureCode::RetryExhausted).await
@@ -784,6 +889,139 @@ impl UploadService {
         Ok(())
     }
 
+    fn has_wanderers(&self, record: &UploadRecord) -> bool {
+        self.spool
+            .load_private(record.operation_id)
+            .ok()
+            .and_then(|private| private.upload.wanderers_endpoint)
+            .is_some()
+    }
+
+    fn late_enabled(&self, session: &SessionData) -> bool {
+        session
+            .upload
+            .as_ref()
+            .and_then(|upload| upload.wanderers_endpoint.as_ref())
+            .is_some()
+    }
+
+    async fn start_wandering(
+        &self,
+        record: &mut UploadRecord,
+        reason: WandererReason,
+    ) -> Result<()> {
+        record.state = UploadState::Wandering;
+        record.wanderer_reason = Some(reason);
+        record.updated_at = Utc::now();
+        record.next_attempt_at = Utc::now();
+        record.expires_at = Some(record.accepted_at + Duration::days(FAILED_RETENTION_DAYS));
+        self.spool.save_record(record)?;
+        self.metrics
+            .spool_outcomes
+            .with_label_values(&[record.source_protocol.as_str(), "wandering"])
+            .inc();
+        Ok(())
+    }
+
+    async fn deliver_wanderer(
+        &self,
+        record: &mut UploadRecord,
+        session: &SessionData,
+    ) -> Result<()> {
+        // A registered operation is idempotent in the CMS, including after process restart.
+        let registration = match self.cms.register_wanderer(session, record).await {
+            Ok(value) => value,
+            Err(DeliveryError::Denied(_)) => {
+                return self.fail(record, FailureCode::DependencyDenied).await;
+            }
+            Err(DeliveryError::Unavailable(error)) => {
+                warn!(operation_id = %record.operation_id, error = %error, "wanderer registration will retry");
+                record.next_attempt_at = Utc::now() + Duration::minutes(5);
+                return self.spool.save_record(record);
+            }
+            Err(DeliveryError::Invalid(_)) => {
+                return self.fail(record, FailureCode::InvalidMetadata).await;
+            }
+        };
+        if matches!(
+            registration.status.as_str(),
+            "pending_review" | "assigned" | "discarded"
+        ) {
+            return self.hold(record).await;
+        }
+        if registration.status != "registered" {
+            return self.fail(record, FailureCode::InvalidMetadata).await;
+        }
+        let s3_url = if let Some(url) = record.s3_url.clone() {
+            url
+        } else {
+            let Some(credentials) = registration.upload else {
+                return self.fail(record, FailureCode::InvalidMetadata).await;
+            };
+            if !credentials.valid()
+                || credentials.key_prefix != format!("wanderers/{}/", record.operation_id)
+            {
+                return self.fail(record, FailureCode::InvalidMetadata).await;
+            }
+            let basename = record
+                .original_filename
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default();
+            let basename = naming::sanitize(basename);
+            if naming::validate_target(&basename).is_err() {
+                return self.fail(record, FailureCode::InvalidMetadata).await;
+            }
+            let key = format!("wanderers/{}/{}", record.operation_id, basename);
+            match put_s3(
+                &credentials,
+                &record.content_type,
+                &self.spool.content_path(record.operation_id),
+                &credentials.bucket,
+                &key,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    warn!(operation_id = %record.operation_id, error = %error, "wanderer S3 delivery will retry");
+                    record.next_attempt_at = Utc::now() + Duration::minutes(5);
+                    return self.spool.save_record(record);
+                }
+            }
+            let url = format!("s3://{}/{}", credentials.bucket, key);
+            record.s3_url = Some(url.clone());
+            self.spool.save_record(record)?;
+            url
+        };
+        match self.cms.wanderer_delivered(session, record, &s3_url).await {
+            Ok(()) => self.hold(record).await,
+            Err(DeliveryError::Denied(_)) => self.fail(record, FailureCode::DependencyDenied).await,
+            Err(DeliveryError::Unavailable(error)) => {
+                warn!(operation_id = %record.operation_id, error = %error, "wanderer delivery confirmation will retry");
+                record.next_attempt_at = Utc::now() + Duration::minutes(5);
+                self.spool.save_record(record)
+            }
+            Err(DeliveryError::Invalid(_)) => self.fail(record, FailureCode::InvalidMetadata).await,
+        }
+    }
+
+    async fn hold(&self, record: &mut UploadRecord) -> Result<()> {
+        let now = Utc::now();
+        record.state = UploadState::Held;
+        record.updated_at = now;
+        record.terminal_at = Some(now);
+        record.expires_at = Some(now + Duration::days(CONFIRMED_RETENTION_DAYS));
+        self.spool.save_record(record)?;
+        self.spool.delete_private_data(record.operation_id)?;
+        self.session_handles.remove(&record.operation_id);
+        self.metrics
+            .spool_outcomes
+            .with_label_values(&[record.source_protocol.as_str(), "held"])
+            .inc();
+        Ok(())
+    }
+
     async fn begin_work(&self, queue: &'static str, semaphore: &Arc<Semaphore>) -> ActiveWork {
         let permit = semaphore
             .clone()
@@ -812,6 +1050,8 @@ fn retry_delay(attempt: u32) -> Duration {
 #[derive(Debug)]
 enum StageFailure {
     Denied,
+    CmsDenied(WandererReason),
+    CmsUnavailable(anyhow::Error),
     Invalid,
     Transient(anyhow::Error),
 }
@@ -1009,8 +1249,11 @@ mod tests {
                 expires_at: "2099-01-01T00:00:00Z".into(),
                 naming_policy: None,
                 sequence_endpoint: None,
+                credentials_endpoint: None,
+                wanderers_endpoint: None,
             }),
             validation_key: Some("client-secret".into()),
+            device_id: None,
         }
     }
 
@@ -1042,6 +1285,75 @@ mod tests {
         assert_eq!(retry_delay(1), Duration::seconds(1));
         assert_eq!(retry_delay(4), Duration::minutes(2));
         assert_eq!(retry_delay(5), Duration::minutes(5));
+    }
+
+    #[tokio::test]
+    async fn wandering_and_held_are_durable_and_receipt_keeps_private_fields_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        std::fs::write(&source, b"durable-media").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let mut session = session();
+        session.device_id = Some("17".into());
+        session.upload.as_mut().unwrap().wanderers_endpoint = Some("/wanderers".into());
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "source.bin", &source)
+            .unwrap();
+        let service = test_service(spool.clone());
+        service
+            .start_wandering(&mut record, WandererReason::AssignmentMissing)
+            .await
+            .unwrap();
+        let restored = spool.load_record(record.operation_id).unwrap();
+        assert_eq!(restored.state, UploadState::Wandering);
+        assert_eq!(
+            restored.wanderer_reason,
+            Some(WandererReason::AssignmentMissing)
+        );
+        assert!(restored.due(Utc::now()));
+        service.hold(&mut record).await.unwrap();
+        let receipt =
+            serde_json::to_value(spool.load_record(record.operation_id).unwrap().receipt())
+                .unwrap();
+        assert_eq!(receipt["state"], "held");
+        for private in [
+            "device_id",
+            "s3_url",
+            "object_bucket",
+            "object_key",
+            "original_filename",
+        ] {
+            assert!(receipt.get(private).is_none(), "receipt exposed {private}");
+        }
+        assert!(!spool.content_path(record.operation_id).exists());
+        assert!(spool.load_private(record.operation_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn cms_outage_does_not_spend_upload_attempt_budget_when_advertised() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        std::fs::write(&source, b"durable-media").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let mut session = session();
+        session.upload.as_mut().unwrap().wanderers_endpoint = Some("/wanderers".into());
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "source.bin", &source)
+            .unwrap();
+        record.upload_attempts = 1;
+        let service = test_service(spool.clone());
+        let before = Utc::now();
+        service
+            .handle_upload_failure(
+                &mut record,
+                StageFailure::CmsUnavailable(anyhow!("simulated outage")),
+            )
+            .await
+            .unwrap();
+        let restored = spool.load_record(record.operation_id).unwrap();
+        assert_eq!(restored.upload_attempts, 0);
+        assert_eq!(restored.state, UploadState::Accepted);
+        assert!(restored.next_attempt_at >= before + Duration::minutes(5));
     }
 
     #[tokio::test]

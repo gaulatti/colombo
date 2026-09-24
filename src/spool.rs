@@ -45,6 +45,8 @@ pub enum UploadState {
     Accepted,
     Uploading,
     Delivered,
+    Wandering,
+    Held,
     CallbackConfirmed,
     Failed,
     Expired,
@@ -56,6 +58,8 @@ impl UploadState {
             Self::Accepted => "accepted",
             Self::Uploading => "uploading",
             Self::Delivered => "delivered",
+            Self::Wandering => "wandering",
+            Self::Held => "held",
             Self::CallbackConfirmed => "callback_confirmed",
             Self::Failed => "failed",
             Self::Expired => "expired",
@@ -63,7 +67,10 @@ impl UploadState {
     }
 
     pub fn pending(self) -> bool {
-        matches!(self, Self::Accepted | Self::Uploading | Self::Delivered)
+        matches!(
+            self,
+            Self::Accepted | Self::Uploading | Self::Delivered | Self::Wandering
+        )
     }
 }
 
@@ -95,6 +102,8 @@ pub struct UploadRecord {
     pub operation_id: Uuid,
     pub tenant_id: i64,
     pub assignment_id: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub original_filename: String,
     pub source_protocol: SourceProtocol,
     pub content_length: u64,
@@ -114,6 +123,17 @@ pub struct UploadRecord {
     pub terminal_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub failure_code: Option<FailureCode>,
+    #[serde(default)]
+    pub wanderer_reason: Option<WandererReason>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WandererReason {
+    AssignmentInactiveAtAcceptance,
+    AssignmentMissing,
+    CallbackRejected,
+    DeadlineExceeded,
 }
 
 impl UploadRecord {
@@ -232,6 +252,7 @@ impl Spool {
                 operation_id,
                 tenant_id: session.tenant.id,
                 assignment_id: session.assignment_id.clone(),
+                device_id: session.device_id.clone(),
                 original_filename: original_filename.to_owned(),
                 source_protocol,
                 content_length: length,
@@ -254,6 +275,7 @@ impl Spool {
                 terminal_at: None,
                 expires_at: None,
                 failure_code: None,
+                wanderer_reason: None,
             };
             let private = PrivateUploadContext {
                 upload,
@@ -397,7 +419,7 @@ impl Spool {
                 let mut record = self.load_record(operation_id)?;
                 if matches!(
                     record.state,
-                    UploadState::CallbackConfirmed | UploadState::Failed
+                    UploadState::CallbackConfirmed | UploadState::Held | UploadState::Failed
                 ) && record
                     .expires_at
                     .is_some_and(|expires_at| expires_at <= now)
@@ -567,8 +589,11 @@ mod tests {
                 expires_at: "2099-01-01T00:00:00Z".into(),
                 naming_policy: None,
                 sequence_endpoint: None,
+                credentials_endpoint: None,
+                wanderers_endpoint: None,
             }),
             validation_key: Some("client-secret".into()),
+            device_id: None,
         }
     }
 
@@ -607,6 +632,62 @@ mod tests {
             fs::read_to_string(spool.operation_dir(record.operation_id).join(RECORD_FILE)).unwrap();
         assert!(!serialized.contains("client-secret"));
         assert!(!serialized.contains("not-serialized-here"));
+    }
+
+    #[test]
+    fn pre_change_record_and_private_context_still_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"historical media").unwrap();
+        let spool = Spool::open(temp.path().join("spool")).unwrap();
+        let record = spool
+            .accept(&session(), SourceProtocol::Http, "source.bin", &source)
+            .unwrap();
+        let directory = spool.operation_dir(record.operation_id);
+        let mut old_record: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join(RECORD_FILE)).unwrap()).unwrap();
+        old_record.as_object_mut().unwrap().remove("device_id");
+        old_record
+            .as_object_mut()
+            .unwrap()
+            .remove("wanderer_reason");
+        fs::write(
+            directory.join(RECORD_FILE),
+            serde_json::to_vec(&old_record).unwrap(),
+        )
+        .unwrap();
+        let mut old_private: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join(PRIVATE_FILE)).unwrap()).unwrap();
+        let upload = old_private
+            .get_mut("upload")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        upload.remove("credentialsEndpoint");
+        upload.remove("wanderersEndpoint");
+        fs::write(
+            directory.join(PRIVATE_FILE),
+            serde_json::to_vec(&old_private).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            spool
+                .load_record(record.operation_id)
+                .unwrap()
+                .device_id
+                .is_none()
+        );
+        assert!(
+            spool
+                .load_private(record.operation_id)
+                .unwrap()
+                .upload
+                .wanderers_endpoint
+                .is_none()
+        );
+        spool
+            .verify_content(&spool.load_record(record.operation_id).unwrap())
+            .unwrap();
     }
 
     #[test]
