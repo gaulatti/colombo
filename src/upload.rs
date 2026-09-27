@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use aws_credential_types::{Credentials, provider::SharedCredentialsProvider};
 use aws_sdk_s3::{Client, error::ProvideErrorMetadata, primitives::ByteStream};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use sqlx::PgPool;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
@@ -32,6 +32,7 @@ use crate::{
 
 const WORKER_COUNT: usize = 8;
 const WORK_QUEUE_CAPACITY: usize = 256;
+const SPOOL_SCAN_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
 #[derive(Debug)]
 pub struct SessionHandle {
@@ -69,6 +70,7 @@ pub struct UploadService {
     spool: Arc<Spool>,
     sender: mpsc::Sender<Uuid>,
     scheduled: Arc<DashMap<Uuid, ()>>,
+    pending: Arc<DashMap<Uuid, DateTime<Utc>>>,
     recovered: Arc<DashMap<Uuid, ()>>,
     session_handles: Arc<DashMap<Uuid, Weak<SessionHandle>>>,
     s3_slots: Arc<Semaphore>,
@@ -114,6 +116,7 @@ impl UploadService {
             spool,
             sender,
             scheduled: Arc::new(DashMap::new()),
+            pending: Arc::new(DashMap::new()),
             recovered: Arc::new(DashMap::new()),
             session_handles: Arc::new(DashMap::new()),
             s3_slots: Arc::new(Semaphore::new(WORKER_COUNT)),
@@ -135,6 +138,8 @@ impl UploadService {
             .persist_acceptance(session, SourceProtocol::Http, original, path)
             .await?;
         self.observe_acceptance(&record);
+        self.pending
+            .insert(record.operation_id, record.next_attempt_at);
         self.enqueue(record.operation_id);
         Ok(record.receipt())
     }
@@ -158,6 +163,8 @@ impl UploadService {
         self.session_handles
             .insert(record.operation_id, Arc::downgrade(&session));
         self.observe_acceptance(&record);
+        self.pending
+            .insert(record.operation_id, record.next_attempt_at);
         self.enqueue(record.operation_id);
         Ok(record.operation_id)
     }
@@ -230,6 +237,9 @@ impl UploadService {
                     if let Err(error) = service.process(operation_id).await {
                         error!(operation_id = %operation_id, error = %error, "durable upload worker failed");
                     }
+                    if let Err(error) = service.refresh_pending(operation_id) {
+                        error!(operation_id = %operation_id, error = %error, "durable upload state refresh failed");
+                    }
                     service.scheduled.remove(&operation_id);
                 }
             });
@@ -239,15 +249,41 @@ impl UploadService {
     fn start_scheduler(self: &Arc<Self>) {
         let service = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(StdDuration::from_secs(1));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut due_interval = tokio::time::interval(StdDuration::from_secs(1));
+            due_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut scan_interval = tokio::time::interval(SPOOL_SCAN_INTERVAL);
+            scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            scan_interval.tick().await; // startup already scanned the spool
             loop {
-                interval.tick().await;
-                if let Err(error) = service.scan_and_schedule(false).await {
-                    error!(error = %error, "durable upload spool scan failed");
+                tokio::select! {
+                    _ = due_interval.tick() => service.schedule_due(),
+                    _ = scan_interval.tick() => {
+                        if let Err(error) = service.scan_and_schedule(false).await {
+                            error!(error = %error, "durable upload spool scan failed");
+                        }
+                    }
                 }
             }
         });
+    }
+
+    fn schedule_due(&self) {
+        let now = Utc::now();
+        for entry in self.pending.iter() {
+            if *entry.value() <= now {
+                self.enqueue(*entry.key());
+            }
+        }
+    }
+
+    fn refresh_pending(&self, operation_id: Uuid) -> Result<()> {
+        let record = self.spool.load_record(operation_id)?;
+        if record.state.pending() {
+            self.pending.insert(operation_id, record.next_attempt_at);
+        } else {
+            self.pending.remove(&operation_id);
+        }
+        Ok(())
     }
 
     fn enqueue(&self, operation_id: Uuid) {
@@ -310,6 +346,12 @@ impl UploadService {
             }
             if record.due(now) {
                 self.enqueue(record.operation_id);
+            }
+            if record.state.pending() {
+                self.pending
+                    .insert(record.operation_id, record.next_attempt_at);
+            } else {
+                self.pending.remove(&record.operation_id);
             }
             if startup
                 && record.state.pending()
@@ -859,6 +901,7 @@ mod tests {
             spool,
             sender,
             scheduled: Arc::new(DashMap::new()),
+            pending: Arc::new(DashMap::new()),
             recovered: Arc::new(DashMap::new()),
             session_handles: Arc::new(DashMap::new()),
             s3_slots: Arc::new(Semaphore::new(1)),
@@ -873,6 +916,54 @@ mod tests {
         assert_eq!(retry_delay(1), Duration::seconds(1));
         assert_eq!(retry_delay(4), Duration::minutes(2));
         assert_eq!(retry_delay(5), Duration::minutes(5));
+    }
+
+    #[tokio::test]
+    async fn scheduler_tracks_pending_retries_without_rechecking_terminal_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        std::fs::write(&source, b"durable-media").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let mut pending = spool
+            .accept(&session(), SourceProtocol::Http, "pending.bin", &source)
+            .unwrap();
+        pending.next_attempt_at = Utc::now() + Duration::minutes(1);
+        spool.save_record(&pending).unwrap();
+        let mut terminal = spool
+            .accept(&session(), SourceProtocol::Http, "terminal.bin", &source)
+            .unwrap();
+        terminal.state = UploadState::CallbackConfirmed;
+        terminal.expires_at = Some(Utc::now() + Duration::days(1));
+        spool.save_record(&terminal).unwrap();
+
+        let mut service = test_service(spool.clone());
+        let (sender, mut receiver) = mpsc::channel(1);
+        service.sender = sender;
+        service.scan_and_schedule(true).await.unwrap();
+        assert_eq!(service.pending.len(), 1);
+        assert!(service.pending.contains_key(&pending.operation_id));
+        service.schedule_due();
+        assert!(receiver.try_recv().is_err());
+
+        pending.next_attempt_at = Utc::now() - Duration::seconds(1);
+        spool.save_record(&pending).unwrap();
+        service.refresh_pending(pending.operation_id).unwrap();
+        service.schedule_due();
+        assert_eq!(receiver.try_recv().unwrap(), pending.operation_id);
+        assert!(!service.pending.contains_key(&terminal.operation_id));
+
+        pending.state = UploadState::Failed;
+        spool.save_record(&pending).unwrap();
+        service.refresh_pending(pending.operation_id).unwrap();
+        service.scheduled.remove(&pending.operation_id);
+        service.schedule_due();
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(service.pending.len(), 0);
+
+        let metrics = String::from_utf8(service.metrics.encode().unwrap()).unwrap();
+        assert!(
+            metrics.contains("colombo_upload_spool_operations{state=\"callback_confirmed\"} 1")
+        );
     }
 
     #[tokio::test]
