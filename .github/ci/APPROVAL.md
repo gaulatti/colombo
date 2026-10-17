@@ -37,6 +37,8 @@ A maintainer confirms intent for one exact PR revision by commenting
 The comment starts a reassessment automatically. An author who maintains the
 repository may confirm intent explicitly; the bot still supplies the required
 technical approval after the checks pass. New commits invalidate that decision.
+If `github-actions[bot]` authored the PR, an independent maintainer must submit
+an actual approving review; that bot cannot approve its own PR.
 
 Apply the same policy to internal and external contributions. Fork code runs on
 disposable, read-only PR runners without secrets. Trusted automation reads PR

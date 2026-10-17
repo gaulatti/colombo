@@ -96,7 +96,7 @@ async function assess({github, context, fetchImpl = fetch}) {
   }
 }
 
-async function maintainerConfirmed(github, repo, pr) {
+async function maintainerConfirmed(github, repo, pr, {reviewOnly = false} = {}) {
   const canConfirm = async user => {
     if (!user || user.type !== 'User') return false;
     const {data} = await github.rest.repos.getCollaboratorPermissionLevel({...repo, username: user.login});
@@ -110,6 +110,7 @@ async function maintainerConfirmed(github, repo, pr) {
   for (const review of latest.values()) {
     if (review.state === 'APPROVED' && review.commit_id === pr.head.sha && await canConfirm(review.user)) return true;
   }
+  if (reviewOnly) return false;
   const comments = await github.paginate(github.rest.issues.listComments, {...repo, issue_number: pr.number, per_page: 100});
   for (const comment of comments) {
     if (comment.body.trim() === `/approve-intent ${pr.head.sha}` && await canConfirm(comment.user)) return true;
@@ -195,11 +196,13 @@ async function gate({github, context, core, assessment = JSON.parse(process.env.
     pr = await getPr();
     if (pr.head.sha !== assessment.head_sha || !pr.auto_merge) throw new Error('Auto-merge was not enabled on the assessed revision');
     const files = await github.paginate(github.rest.pulls.listFiles, {...repo, pull_number, per_page: 100});
-    const humanRequired = assessment.decision !== 'auto_approve' || Boolean(scopeReason(files, pr));
-    if (humanRequired && !await maintainerConfirmed(github, repo, pr)) {
+    const selfAuthored = pr.user?.login === 'github-actions[bot]';
+    const humanRequired = selfAuthored || assessment.decision !== 'auto_approve' || Boolean(scopeReason(files, pr));
+    if (humanRequired && !await maintainerConfirmed(github, repo, pr, {reviewOnly: selfAuthored})) {
       const marker = `<!-- colombo-intent:${pr.head.sha} -->`;
       const reason = assessment.reason.replaceAll('@', '').slice(0, 2000);
-      const summary = `A maintainer's second opinion is required.\n\n${reason}\n\n` +
+      const selfReview = selfAuthored ? 'This PR was authored by the approval bot. A maintainer must first submit an approving review on this exact revision; the bot cannot approve its own PR.\n\n' : '';
+      const summary = `A maintainer's second opinion is required.\n\n${selfReview}${reason}\n\n` +
         `To confirm this change belongs in Colombo, comment:\n\n\`/approve-intent ${pr.head.sha}\`\n\n` +
         'This confirms intent only. All tests and exact 100% line and branch coverage remain mandatory.';
       await finish('action_required', summary);
@@ -227,10 +230,12 @@ async function gate({github, context, core, assessment = JSON.parse(process.env.
     if (pr.head.sha !== assessment.head_sha || pr.base.sha !== assessment.base_sha || pr.state !== 'open' || pr.draft) {
       throw new Error('PR changed before approval');
     }
-    if (humanRequired && !await maintainerConfirmed(github, repo, pr)) throw new Error('Maintainer confirmation was withdrawn');
-    await github.rest.pulls.createReview({...repo, pull_number, commit_id: pr.head.sha, event: 'APPROVE',
-      body: `All tests and exact 100% line and branch coverage passed: ${technical.url}\n\n` +
-        (humanRequired ? 'Repository intent confirmed by a maintainer.' : `Repository fit assessed as a small bug fix: ${assessment.reason}`)});
+    if (humanRequired && !await maintainerConfirmed(github, repo, pr, {reviewOnly: selfAuthored})) throw new Error('Maintainer confirmation was withdrawn');
+    if (!selfAuthored) {
+      await github.rest.pulls.createReview({...repo, pull_number, commit_id: pr.head.sha, event: 'APPROVE',
+        body: `All tests and exact 100% line and branch coverage passed: ${technical.url}\n\n` +
+          (humanRequired ? 'Repository intent confirmed by a maintainer.' : `Repository fit assessed as a small bug fix: ${assessment.reason}`)});
+    }
     await finish('success', `All required tests and coverage passed. Intent ${humanRequired ? 'confirmed by a maintainer' : 'assessed as a small bug fix'}.\n\n${technical.url}`);
 
     for (let attempt = 0; attempt < mergePolls; attempt++) {

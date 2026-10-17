@@ -215,6 +215,22 @@ test('a human intent confirmation never bypasses failing tests', async () => {
   assert.ok(!f.writes.some(write => write.name === 'review'));
 });
 
+test('an Actions-authored PR cannot approve itself through an intent comment', async () => {
+  const f = fixture({comments: [{user: human, body: `/approve-intent ${SHA}`}]});
+  f.state.pr.user = bot;
+  await f.run();
+  assert.ok(f.writes.some(write => write.args.conclusion === 'action_required'));
+  assert.ok(!f.writes.some(write => write.name === 'review'));
+});
+
+test('an independent human review permits an Actions-authored PR without self-approval', async () => {
+  const f = fixture({reviews: [{user: human, state: 'APPROVED', commit_id: SHA}]});
+  f.state.pr.user = bot;
+  await f.run();
+  assert.ok(f.writes.some(write => write.args.conclusion === 'success'));
+  assert.ok(!f.writes.some(write => write.name === 'review'));
+});
+
 test('auto-merge cannot be armed on an unprotected branch', async () => {
   const f = fixture();
   f.github.rest.repos.getBranch = async () => ({data: {protected: false}});

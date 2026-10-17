@@ -48,6 +48,8 @@ jobs:
           toolchain: nightly-2026-10-01
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
@@ -152,9 +154,12 @@ jobs:
             const response = await fetch('https://api.deepseek.com/chat/completions', {
               method: 'POST', signal: AbortSignal.timeout(90000),
               headers: {Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json'},
-              body: JSON.stringify({model: 'deepseek-flash', thinking: {type: 'disabled'}, max_tokens: 32,
+              body: JSON.stringify({model: 'deepseek-flash', thinking: {type: 'enabled'}, reasoning_effort: 'low', max_tokens: 4096,
                 response_format: {type: 'json_object'},
-                messages: [{role: 'user', content: 'Return exactly this JSON object: {"ok":true}'}]}),
+                messages: [
+                  {role: 'system', content: 'You are a provider health check. Return valid JSON only, without tools or markdown.'},
+                  {role: 'user', content: 'Return exactly this JSON object: {"ok":true}'},
+                ]}),
             });
             if (!response.ok) throw new Error(`DeepSeek provider check failed: HTTP ${response.status}`);
             const result = await response.json();
