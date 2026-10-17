@@ -95,13 +95,20 @@ impl CmsClient {
             .context("sequence endpoint missing")?;
         let endpoint = url::Url::parse(&session.tenant.validation_endpoint)?.join(endpoint)?;
         let start = Instant::now();
-        let response = self
+        let response = match self
             .client
             .post(endpoint)
             .header("X-Colombo-API-Key", &session.tenant.api_key)
             .json(&serde_json::json!({"assignment_id": session.assignment_id}))
             .send()
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.observe("cms", "sequence", "error", start);
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         self.metrics
             .dependency_duration
@@ -310,6 +317,22 @@ mod tests {
         assert!(client.next_sequence(&s).await.is_err());
         s.upload = None;
         assert!(client.next_sequence(&s).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sequence_transport_failures_are_counted_in_dependency_metrics() {
+        let metrics = Metrics::new("sequence-transport").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        let mut session = session("http://127.0.0.1:0");
+        session.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
+        assert!(client.next_sequence(&session).await.is_err());
+        assert_eq!(
+            metrics
+                .dependency_duration
+                .with_label_values(&["cms", "sequence", "error"])
+                .get_sample_count(),
+            1
+        );
     }
 
     #[tokio::test]
