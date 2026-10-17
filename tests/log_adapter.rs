@@ -173,14 +173,15 @@ async fn library_users_without_a_tracing_subscriber_receive_operational_logs() {
             500
         );
     }
-    let messages = LOGGER.0.lock().unwrap();
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("upload durably accepted"))
-    );
-    assert!(messages.iter().any(|m| m.contains("FTP listener ready")));
-    drop(messages);
+    {
+        let messages = LOGGER.0.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("upload durably accepted"))
+        );
+        assert!(messages.iter().any(|m| m.contains("FTP listener ready")));
+    }
     mock.abort();
     log::logger().flush();
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
