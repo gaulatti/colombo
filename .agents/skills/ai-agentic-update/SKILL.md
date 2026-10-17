@@ -47,7 +47,7 @@ exact no-commit call made by pre-commit legacy updaters and creates the required
 narrow bootstrap commit during that same first invocation; this compatibility
 does not make ordinary manual `sync --write --repository` calls commit.
 
-Access to private Bastille must not block agent execution. If central fetch or
+Access to private bastille must not block agent execution. If central fetch or
 clone fails because access or connectivity is unavailable, the updater reports
 `bastille-unavailable` and uses the complete checked-in managed snapshot without
 changing it. Continue with that snapshot; no private-repository credential is

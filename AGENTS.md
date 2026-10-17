@@ -20,7 +20,7 @@ weaken or contradict these rules.
   expected wiki remote. Reread the updated root `AGENTS.md`, any applicable
   skills, and the relevant wiki pages for public repositories before
   continuing.
-- Access to private Bastille must never be a prerequisite for agent execution.
+- Access to private bastille must never be a prerequisite for agent execution.
   If the central source cannot be reached or access is denied, the updater must
   report that it is using the checked-in managed rules and skills and continue
   without changing them. Developers need no central-repository credential.
