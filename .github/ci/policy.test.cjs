@@ -42,6 +42,7 @@ function fixture(overrides = {}) {
       listFiles: endpoint('files', () => ({data: state.files})),
       listReviews: endpoint('reviews', () => ({data: state.reviews})),
       createReview: write('review'),
+      requestReviewers: write('requestReview'),
     },
     repos: {
       get: endpoint('repo', () => ({data: {allow_auto_merge: true}})),
@@ -50,7 +51,8 @@ function fixture(overrides = {}) {
       getContent: endpoint('content', () => ({data: {content: Buffer.from('original source').toString('base64'), encoding: 'base64'}})),
       listCommits: endpoint('history', () => ({data: [{sha: BASE, commit: {message: 'feat: establish naming contract'}}]})),
     },
-    issues: {listComments: endpoint('comments', () => ({data: state.comments})), createComment: write('comment')},
+    issues: {listComments: endpoint('comments', () => ({data: state.comments})), createComment: write('comment'),
+      addAssignees: write('assign')},
     checks: {create: write('createCheck', {data: {id: 1}}), update: write('updateCheck')},
     actions: {
       listWorkflowRuns: endpoint('runs', () => ({data: {workflow_runs: state.run ? [state.run] : []}})),
@@ -200,6 +202,27 @@ test('maintainer confirmation is revision-specific; contributors and bots cannot
   assert.equal(await maintainerConfirmed(f.github, repo, small), true);
   f.state.comments[0].user = bot;
   assert.equal(await maintainerConfirmed(f.github, repo, small), false);
+});
+
+test('manual decisions are assigned to gaulatti and request his review on contributor PRs', async () => {
+  for (const author of ['contributor', 'gaulatti']) {
+    const f = fixture();
+    f.state.pr.user = {login: author, type: 'User'};
+    await f.run({assessment: {...automatic, decision: 'second_opinion'}});
+    assert.deepEqual(f.writes.find(write => write.name === 'assign').args.assignees, ['gaulatti']);
+    const request = f.writes.find(write => write.name === 'requestReview');
+    if (author === 'gaulatti') assert.equal(request, undefined);
+    else assert.deepEqual(request.args.reviewers, ['gaulatti']);
+    assert.ok(!f.writes.some(write => write.name === 'review'));
+  }
+});
+
+test('manual handoff does not duplicate an existing assignment or review request', async () => {
+  const f = fixture();
+  f.state.pr.assignees = [{login: 'gaulatti'}];
+  f.state.pr.requested_reviewers = [{login: 'gaulatti'}];
+  await f.run({assessment: {...automatic, decision: 'second_opinion'}});
+  assert.ok(!f.writes.some(write => ['assign', 'requestReview'].includes(write.name)));
 });
 
 test('a withdrawn human approval cannot be reused', async () => {

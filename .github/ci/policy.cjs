@@ -4,6 +4,7 @@ const fs = require('node:fs');
 
 const CHECK = 'approval-policy';
 const WORKFLOW = 'backend-ci.yml';
+const MANUAL_REVIEWER = 'gaulatti';
 const VERIFY_STEPS = [
   'Test approval policy', 'Rust format and lint',
   'Run all targets with branch instrumentation', 'Run documentation tests',
@@ -205,6 +206,14 @@ async function gate({github, context, core, assessment = JSON.parse(process.env.
     const intentPending = assessment.decision === 'pending_technical';
     const humanRequired = selfAuthored || (!intentPending && assessment.decision !== 'auto_approve') || Boolean(scopeReason(files, pr));
     if (humanRequired && !await maintainerConfirmed(github, repo, pr, {reviewOnly: selfAuthored})) {
+      if (!pr.assignees?.some(user => user.login === MANUAL_REVIEWER)) {
+        await github.rest.issues.addAssignees({...repo, issue_number: pull_number, assignees: [MANUAL_REVIEWER]});
+      }
+      // GitHub cannot request a review from the PR's own author; assignment
+      // still routes that intent decision to the repository owner.
+      if (pr.user?.login !== MANUAL_REVIEWER && !pr.requested_reviewers?.some(user => user.login === MANUAL_REVIEWER)) {
+        await github.rest.pulls.requestReviewers({...repo, pull_number, reviewers: [MANUAL_REVIEWER]});
+      }
       const marker = `<!-- colombo-intent:${pr.head.sha} -->`;
       const reason = assessment.reason.replaceAll('@', '').slice(0, 2000);
       const selfReview = selfAuthored ? 'This PR was authored by the approval bot. A maintainer must first submit an approving review on this exact revision; the bot cannot approve its own PR.\n\n' : '';
