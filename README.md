@@ -119,16 +119,27 @@ Full architecture, configuration, CMS contracts, deployment, and tenant administ
 
 ## Pull requests
 
-The Backend CI workflow requires all tests and exactly 100% line and branch
+The Backend CI workflow uses the public [Clouseau](https://github.com/gaulatti/clouseau)
+action, pinned to a reviewed commit. It requires all tests and exactly 100% line and branch
 coverage of Colombo's application sources. It arms auto-merge and approves only
-the verified PR revision. Small bug fixes are assessed against existing behavior,
-ticket criteria, and repository precedent using DeepSeek Flash. Major changes or
-unclear intent request a maintainer's second opinion; that confirmation never
-waives tests or coverage. External contributions follow the same policy, with
+the verified PR revision. DeepSeek Flash assesses repository purpose, supported
+intent, and meaningful test evidence using the contract, tickets, and precedent.
+Coverage improvements and in-scope maintenance have no file/line cutoff. Product
+drift, unclear requirements, and changes to review controls need the owner's
+second opinion. Detected fake tests or bypassed behavior block approval even
+after intent confirmation; all tests and exact coverage remain mandatory. External contributions follow the same policy, with
 fork code isolated from approval credentials and secrets.
 
-See the [approval policy](.github/ci/APPROVAL.md) and
+Each repository keeps its [review contract](.github/clouseau.md) and
+[configuration](.github/clouseau.json); shared review rules live in Clouseau.
+Private bastille access is unnecessary for contributors or CI.
+
+See the [shared review policy](https://github.com/gaulatti/clouseau/blob/b067a1baba99355d6c086519088ac7b96eef55f9/policy/intent-review.md) and
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
+
+CI builds the normal container once using persistent Docker-layer and Cargo
+cache mounts. The integration suite exercises that image; CD pushes the tested
+image without rebuilding it. Intent comments reuse the existing verification.
 
 ## Java versus Rust benchmark
 

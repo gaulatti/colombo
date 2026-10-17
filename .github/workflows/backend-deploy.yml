@@ -15,6 +15,7 @@ on:
       - 'scripts/**'
       - 'tests/**'
       - '.github/workflows/backend-deploy.yml'
+      - '.github/actions/build-container/**'
   workflow_dispatch:
 
 jobs:
@@ -63,16 +64,21 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           use_oidc: true
+      - name: Build verification container
+        uses: ./.github/actions/build-container
       - name: Verify container boundary
+        env:
+          COLOMBO_TEST_IMAGE: colombo:ci
+          COLOMBO_E2E_SKIP_BUILD: '1'
         run: ./tests/e2e.sh
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.DEPLOYMENT_TOKEN }}
-      - name: Build and push image
+      - name: Push verified image
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:latest .
+          docker tag colombo:ci ghcr.io/${{ github.repository }}:latest
           docker push ghcr.io/${{ github.repository }}:latest
 
   deploy:

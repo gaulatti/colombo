@@ -25,6 +25,7 @@ services:
       retries: 20
 
   colombo:
+    image: ${COLOMBO_TEST_IMAGE:-colombo:local}
     build: .
     environment:
       PORT: "8080"
