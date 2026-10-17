@@ -104,6 +104,19 @@ Useful commands:
 
 Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](https://github.com/gaulatti/colombo/wiki).
 
+## Pull requests
+
+The Backend CI workflow requires all tests and exactly 100% line and branch
+coverage of Colombo's application sources. It arms auto-merge and approves only
+the verified PR revision. Small bug fixes are assessed against existing behavior,
+ticket criteria, and repository precedent using DeepSeek Flash. Major changes or
+unclear intent request a maintainer's second opinion; that confirmation never
+waives tests or coverage. External contributions follow the same policy, with
+fork code isolated from approval credentials and secrets.
+
+See the [approval policy](.github/ci/APPROVAL.md) and
+[CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
+
 ## Java versus Rust benchmark
 
 Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 255 ms versus 9.94 s to become healthy, 1.281 MiB versus 235.6 MiB idle memory, 18.41x the HTTP root throughput, and 4.23x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.
