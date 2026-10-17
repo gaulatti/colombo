@@ -49,10 +49,15 @@ async function assess({github, context, fetchImpl = fetch}) {
   const identity = {number: pull_number, head_sha: pr.head.sha, base_sha: pr.base.sha};
   const hold = reason => ({...identity, decision: 'second_opinion', reason});
   if (pr.state !== 'open' || pr.draft || pr.base.ref !== 'main') return hold('PR is not ready for main');
+  if (pr.user?.login === 'github-actions[bot]') return hold('The approval bot cannot review its own PR; an independent maintainer review is required');
   const files = await github.paginate(github.rest.pulls.listFiles, {...repo, pull_number, per_page: 100});
   const reason = scopeReason(files, pr);
   if (reason) return hold(reason);
   if (!process.env.DEEPSEEK_API_KEY) return hold('AI assessment unavailable: DEEPSEEK_API_KEY is not configured');
+  // Do not spend provider credits on a PR whose technical gate is not green.
+  const technical = await technicalRun(github, repo, pr);
+  if (technical.pending) return {...identity, decision: 'pending_technical', reason: 'Waiting for all tests and exact 100% coverage'};
+  if (technical.failure) return {...identity, decision: 'blocked_technical', reason: technical.failure};
 
   try {
     const precedent = [];
@@ -65,9 +70,10 @@ async function assess({github, context, fetchImpl = fetch}) {
     }
     const linked = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!) {
       repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
-        closingIssuesReferences(first:10) { nodes { number title body url } }
+        closingIssuesReferences(first:10) { nodes { number title body url } pageInfo { hasNextPage } }
       } }
     }`, {...repo, number: pull_number});
+    if (linked.repository.pullRequest.closingIssuesReferences.pageInfo.hasNextPage) return hold('Linked-ticket context is incomplete');
     const input = JSON.stringify({head_sha: pr.head.sha, title: pr.title, description: pr.body,
       tickets: linked.repository.pullRequest.closingIssuesReferences.nodes, precedent,
       patches: files.map(file => ({path: file.filename, patch: file.patch}))});
@@ -139,20 +145,18 @@ async function technicalRun(github, repo, pr) {
 }
 
 async function assertProtection(github, repo) {
-  const result = await github.graphql(`query($owner:String!,$repo:String!) {
-    repository(owner:$owner,name:$repo) { ref(qualifiedName:"refs/heads/main") { branchProtectionRule {
-      requiresStatusChecks requiresStrictStatusChecks requiresApprovingReviews
-      requiredApprovingReviewCount dismissesStaleReviews isAdminEnforced
-      requiredStatusChecks { context app { slug } }
-    } } }
-  }`, repo);
-  const rule = result.repository.ref?.branchProtectionRule;
-  if (!rule || !rule.requiresStatusChecks || !rule.requiresStrictStatusChecks ||
-    !rule.requiresApprovingReviews || rule.requiredApprovingReviewCount < 1 ||
-    !rule.dismissesStaleReviews || !rule.isAdminEnforced ||
-    ['verify', CHECK].some(name => !rule.requiredStatusChecks.some(check =>
-      check.context === name && check.app?.slug === 'github-actions'))) {
-    throw new Error('Main must enforce verify, approval-policy, fresh approval, and up-to-date checks without an admin bypass');
+  // Ruleset inspection needs metadata read, not an administrative credential.
+  const {data: rules} = await github.request('GET /repos/{owner}/{repo}/rules/branches/{branch}',
+    {...repo, branch: 'main', per_page: 100});
+  const checks = rules.find(rule => rule.type === 'required_status_checks')?.parameters;
+  const reviews = rules.find(rule => rule.type === 'pull_request')?.parameters;
+  if (!checks?.strict_required_status_checks_policy ||
+    ['verify', CHECK].some(name => !checks.required_status_checks.some(check =>
+      check.context === name && check.integration_id === 15368)) ||
+    !reviews || reviews.required_approving_review_count < 1 ||
+    !reviews.dismiss_stale_reviews_on_push || !reviews.require_last_push_approval ||
+    !rules.some(rule => rule.type === 'deletion') || !rules.some(rule => rule.type === 'non_fast_forward')) {
+    throw new Error('Main must enforce verify, approval-policy, fresh approval, up-to-date checks, and protection from deletion/force pushes');
   }
 }
 
@@ -197,7 +201,9 @@ async function gate({github, context, core, assessment = JSON.parse(process.env.
     if (pr.head.sha !== assessment.head_sha || !pr.auto_merge) throw new Error('Auto-merge was not enabled on the assessed revision');
     const files = await github.paginate(github.rest.pulls.listFiles, {...repo, pull_number, per_page: 100});
     const selfAuthored = pr.user?.login === 'github-actions[bot]';
-    const humanRequired = selfAuthored || assessment.decision !== 'auto_approve' || Boolean(scopeReason(files, pr));
+    if (assessment.decision === 'blocked_technical') throw new Error(assessment.reason);
+    const intentPending = assessment.decision === 'pending_technical';
+    const humanRequired = selfAuthored || (!intentPending && assessment.decision !== 'auto_approve') || Boolean(scopeReason(files, pr));
     if (humanRequired && !await maintainerConfirmed(github, repo, pr, {reviewOnly: selfAuthored})) {
       const marker = `<!-- colombo-intent:${pr.head.sha} -->`;
       const reason = assessment.reason.replaceAll('@', '').slice(0, 2000);
@@ -229,6 +235,14 @@ async function gate({github, context, core, assessment = JSON.parse(process.env.
     pr = await getPr();
     if (pr.head.sha !== assessment.head_sha || pr.base.sha !== assessment.base_sha || pr.state !== 'open' || pr.draft) {
       throw new Error('PR changed before approval');
+    }
+    if (intentPending) {
+      // A new run gives the read-only assessment job its own provider credential.
+      // The write-capable controller never receives that credential.
+      await github.rest.actions.createWorkflowDispatch({...repo, workflow_id: WORKFLOW, ref: 'main',
+        inputs: {pull_request: String(pull_number)}});
+      core.info('Technical gate passed; requested intent assessment. No approval has been granted.');
+      return;
     }
     if (humanRequired && !await maintainerConfirmed(github, repo, pr, {reviewOnly: selfAuthored})) throw new Error('Maintainer confirmation was withdrawn');
     if (!selfAuthored) {

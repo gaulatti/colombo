@@ -31,7 +31,12 @@ function fixture(overrides = {}) {
     ...overrides};
   const endpoint = (name, implementation) => Object.assign(async args => implementation(args), {endpointName: name});
   const write = (name, result = {data: {}}) => endpoint(name, async args => {writes.push({name, args}); return result;});
-  const github = {rest: {
+  const github = {request: async () => ({data: [
+    {type: 'required_status_checks', parameters: {strict_required_status_checks_policy: true,
+      required_status_checks: ['verify', 'approval-policy'].map(context => ({context, integration_id: 15368}))}},
+    {type: 'pull_request', parameters: {required_approving_review_count: 1, dismiss_stale_reviews_on_push: true, require_last_push_approval: true}},
+    {type: 'deletion'}, {type: 'non_fast_forward'},
+  ]}), rest: {
     pulls: {
       get: endpoint('getPr', async () => {fetches++; return {data: structuredClone(state.pr)};}),
       listFiles: endpoint('files', () => ({data: state.files})),
@@ -54,12 +59,7 @@ function fixture(overrides = {}) {
     },
   }, graphql: async (query, args) => {
     if (query.startsWith('mutation')) {writes.push({name: 'arm', args}); state.pr.auto_merge = {}; return {};}
-    if (query.includes('branchProtectionRule')) return {repository: {ref: {branchProtectionRule: {
-      requiresStatusChecks: true, requiresStrictStatusChecks: true, requiresApprovingReviews: true,
-      requiredApprovingReviewCount: 1, dismissesStaleReviews: true, isAdminEnforced: true,
-      requiredStatusChecks: ['verify', 'approval-policy'].map(context => ({context, app: {slug: 'github-actions'}})),
-    }}}};
-    return {repository: {pullRequest: {closingIssuesReferences: {nodes: [{number: 1, title: 'Fix naming', body: 'Restore contract'}]}}}};
+    return {repository: {pullRequest: {closingIssuesReferences: {nodes: [{number: 1, title: 'Fix naming', body: 'Restore contract'}], pageInfo: {hasNextPage: false}}}}};
   }};
   github.paginate = async (method, args) => (await method(args)).data;
   const core = {info: () => {}};
@@ -123,6 +123,27 @@ test('missing AI credentials require a second opinion', async () => {
     assert.equal(result.decision, 'second_opinion');
     assert.match(result.reason, /not configured/);
   } finally {if (old !== undefined) process.env.DEEPSEEK_API_KEY = old;}
+});
+
+test('pending or failed CI never spends provider credits', async () => {
+  const old = process.env.DEEPSEEK_API_KEY; process.env.DEEPSEEK_API_KEY = 'fixture-key';
+  try {
+    for (const [status, conclusion, expected] of [
+      ['in_progress', null, 'pending_technical'], ['completed', 'failure', 'blocked_technical'],
+    ]) {
+      const f = fixture(); f.state.run.status = status; f.state.run.conclusion = conclusion;
+      const result = await assess({github: f.github, context, fetchImpl: () => assert.fail('must not spend provider credits')});
+      assert.equal(result.decision, expected);
+    }
+  } finally {if (old === undefined) delete process.env.DEEPSEEK_API_KEY; else process.env.DEEPSEEK_API_KEY = old;}
+});
+
+test('a successful technical gate requests an intent assessment without approving early', async () => {
+  const f = fixture();
+  await f.run({assessment: {...automatic, decision: 'pending_technical'}});
+  assert.ok(f.writes.some(write => write.name === 'dispatch' && write.args.workflow_id === 'backend-ci.yml' && write.args.inputs.pull_request === '8'));
+  assert.ok(!f.writes.some(write => write.name === 'review'));
+  assert.ok(!f.writes.some(write => write.args.conclusion === 'success'));
 });
 
 test('failed, skipped, incomplete or stale technical checks cannot approve', async () => {
@@ -240,7 +261,7 @@ test('auto-merge cannot be armed on an unprotected branch', async () => {
 
 test('partial protection cannot satisfy the policy or arm auto-merge', async () => {
   const f = fixture();
-  f.github.graphql = async () => ({repository: {ref: {branchProtectionRule: {requiresStatusChecks: false}}}});
+  f.github.request = async () => ({data: []});
   await assert.rejects(assertProtection(f.github, repo), /Main must enforce/);
   await assert.rejects(f.run(), /Main must enforce/);
   assert.equal(f.writes.length, 0);
