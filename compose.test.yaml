@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: colombo
+      POSTGRES_PASSWORD: colombo
+      POSTGRES_DB: colombo
+    ports:
+      - "127.0.0.1:55436:5432"
+    tmpfs:
+      - /var/lib/postgresql/data:size=256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U colombo -d colombo"]
+      interval: 2s
+      timeout: 5s
+      retries: 20

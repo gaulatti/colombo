@@ -431,6 +431,10 @@ pub async fn serve(
     .passive_ports(config.passive_ports.clone())
     .pooled_listener_mode()
     .idle_session_timeout(300)
+    .shutdown_indicator(async {
+        let _ = tokio::signal::ctrl_c().await;
+        libunftp::options::Shutdown::new()
+    })
     .metrics();
     if let Some(host) = config.passive_external_address.as_deref() {
         builder = builder.passive_host(PassiveHost::Dns(host.to_owned()));
@@ -449,4 +453,214 @@ pub async fn serve(
         .listen(format!("0.0.0.0:{}", config.ftp_port))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        spool::Spool,
+        test_support::{self, Mock},
+    };
+    use tokio::io::AsyncReadExt;
+
+    fn auth(pool: PgPool, metrics: Arc<Metrics>) -> FtpAuth {
+        FtpAuth {
+            pool,
+            cms: CmsClient::new(metrics.clone()).unwrap(),
+            master_password: Some("support-password".into()),
+            pending: Arc::new(DashMap::new()),
+            metrics,
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_denials_and_dependency_failures_never_create_users() {
+        let metrics = Metrics::new("test").unwrap();
+        let pool = test_support::database().await;
+        let auth = auth(pool.clone(), metrics.clone());
+        assert!(format!("{auth:?}").contains("FtpAuth"));
+        let mut creds = Credentials::from("key");
+        creds.password = None;
+        assert!(matches!(
+            auth.authenticate("photographer", &creds).await,
+            Err(AuthenticationError::BadPassword)
+        ));
+        assert!(matches!(
+            auth.authenticate("unknown", &Credentials::from("key"))
+                .await,
+            Err(AuthenticationError::BadUser)
+        ));
+        pool.close().await;
+        assert!(
+            auth.authenticate("photographer", &Credentials::from("key"))
+                .await
+                .is_err()
+        );
+        assert!(auth.pending.is_empty());
+        for status in [401, 503] {
+            let mock = Mock::new(vec![(status, "{}".into())]).await;
+            let pool = test_support::database().await;
+            test_support::seed(&pool, &test_support::session(&mock.url)).await;
+            let auth = super::tests::auth(pool, metrics.clone());
+            assert!(
+                auth.authenticate("photographer", &Credentials::from("key"))
+                    .await
+                    .is_err()
+            );
+            assert!(auth.pending.is_empty());
+        }
+        let text = String::from_utf8(metrics.encode().unwrap()).unwrap();
+        for result in ["unsupported", "unknown_user", "unavailable", "denied"] {
+            assert!(text.contains(&format!("result=\"{result}\",source=\"ftp\"")));
+        }
+    }
+
+    #[tokio::test]
+    async fn connections_get_distinct_one_use_principals_and_balanced_session_leases() {
+        let mock = Mock::new(vec![(
+            200,
+            test_support::validation(&test_support::session("http://unused")),
+        )])
+        .await;
+        let pool = test_support::database().await;
+        test_support::seed(&pool, &test_support::session(&mock.url)).await;
+        let metrics = Metrics::new("test").unwrap();
+        let auth = auth(pool, metrics.clone());
+        let provider = UserProvider {
+            pending: auth.pending.clone(),
+            metrics: metrics.clone(),
+        };
+        assert!(format!("{provider:?}").contains("UserProvider"));
+        let first = auth
+            .authenticate("photographer", &Credentials::from("key"))
+            .await
+            .unwrap();
+        let second = auth
+            .authenticate("photographer", &Credentials::from("key"))
+            .await
+            .unwrap();
+        assert_ne!(first.username, second.username);
+        let first_user = provider.provide_user_detail(&first).await.unwrap();
+        let second_user = provider.provide_user_detail(&second).await.unwrap();
+        assert_eq!(first_user.to_string(), "photographer");
+        assert!(format!("{first_user:?}").contains("photographer"));
+        assert!(!Arc::ptr_eq(
+            &first_user.lease.session,
+            &second_user.lease.session
+        ));
+        assert!(provider.provide_user_detail(&first).await.is_err());
+        assert_eq!(metrics.ftp_sessions.get(), 2);
+        let clone = first_user.clone();
+        drop(first_user);
+        assert_eq!(metrics.ftp_sessions.get(), 2);
+        drop(clone);
+        assert_eq!(metrics.ftp_sessions.get(), 1);
+        drop(second_user);
+        assert_eq!(metrics.ftp_sessions.get(), 0);
+        let support = auth
+            .authenticate("photographer", &Credentials::from("support-password"))
+            .await
+            .unwrap();
+        let user = provider.provide_user_detail(&support).await.unwrap();
+        let snapshot = user.lease.session.snapshot().await;
+        assert!(snapshot.upload.is_none());
+        assert!(snapshot.validation_key.is_none());
+        assert_eq!(snapshot.assignment_id, "support-assignment-photographer");
+        drop(user);
+        assert_eq!(metrics.ftp_sessions.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn storage_preserves_filesystem_contract_and_requires_durable_acceptance() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("spool");
+        let spool = Arc::new(Spool::open(root.clone()).unwrap());
+        let pool = test_support::database().await;
+        let uploads = UploadService::isolated(pool, spool.clone());
+        let metrics = Metrics::new("test").unwrap();
+        metrics.ftp_sessions.inc();
+        let user = ColomboUser {
+            username: "photographer".into(),
+            lease: Arc::new(SessionLease {
+                session: SessionHandle::new(test_support::session("http://unused")),
+                metrics,
+            }),
+        };
+        let mut storage = ColomboStorage::new(root.join("ftp-incoming"), uploads).unwrap();
+        assert!(format!("{storage:?}").contains("ColomboStorage"));
+        <ColomboStorage as StorageBackend<ColomboUser>>::enter(&mut storage, &user).unwrap();
+        assert_eq!(
+            <ColomboStorage as StorageBackend<ColomboUser>>::supported_features(&storage),
+            <Filesystem as StorageBackend<ColomboUser>>::supported_features(&storage.inner)
+        );
+        storage.mkd(&user, "folder").await.unwrap();
+        storage.cwd(&user, "folder").await.unwrap();
+        assert_eq!(
+            storage
+                .put(
+                    &user,
+                    std::io::Cursor::new(b"file bytes"),
+                    "/folder/photo.jpg",
+                    0
+                )
+                .await
+                .unwrap(),
+            10
+        );
+        assert_eq!(spool.operation_ids().unwrap().len(), 1);
+        std::fs::write(root.join("ftp-incoming/folder/file.txt"), b"readable").unwrap();
+        storage.metadata(&user, "folder/file.txt").await.unwrap();
+        assert_eq!(storage.list(&user, "folder").await.unwrap().len(), 1);
+        let mut file = storage.get(&user, "folder/file.txt", 0).await.unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"readable");
+        storage
+            .rename(&user, "folder/file.txt", "folder/renamed.txt")
+            .await
+            .unwrap();
+        storage.del(&user, "folder/renamed.txt").await.unwrap();
+        storage.rmd(&user, "folder").await.unwrap();
+        let default = unftp_core::auth::DefaultUser {};
+        storage.mkd(&default, "default").await.unwrap();
+        storage.cwd(&default, "default").await.unwrap();
+        assert_eq!(
+            storage
+                .put(
+                    &default,
+                    std::io::Cursor::new(b"default bytes"),
+                    "default/file",
+                    0
+                )
+                .await
+                .unwrap(),
+            13
+        );
+        storage.metadata(&default, "default/file").await.unwrap();
+        assert_eq!(storage.list(&default, "default").await.unwrap().len(), 1);
+        let mut file = storage.get(&default, "default/file", 0).await.unwrap();
+        let mut text = String::new();
+        file.read_to_string(&mut text).await.unwrap();
+        assert_eq!(text, "default bytes");
+        storage
+            .rename(&default, "default/file", "default/renamed")
+            .await
+            .unwrap();
+        storage.del(&default, "default/renamed").await.unwrap();
+        storage.rmd(&default, "default").await.unwrap();
+        user.lease.session.invalidate();
+        assert!(
+            storage
+                .put(
+                    &user,
+                    std::io::Cursor::new(b"must not accept"),
+                    "rejected.jpg",
+                    0
+                )
+                .await
+                .is_err()
+        );
+        assert!(ColomboStorage::new(temp.path().join("missing"), storage.uploads.clone()).is_err());
+    }
 }

@@ -100,9 +100,10 @@ impl Config {
                 .map_err(|_| anyhow::anyhow!("invalid database username"))?;
         }
         if parsed.password().is_none() {
+            // A URL that already contains or accepts a username also accepts a password.
             parsed
                 .set_password(Some(&self.database_password))
-                .map_err(|_| anyhow::anyhow!("invalid database password"))?;
+                .expect("a URL accepting a username accepts a password");
         }
         Ok(parsed.into())
     }
@@ -213,5 +214,44 @@ mod tests {
         let redacted = redact_database_url("postgresql://user:secret@localhost/colombo");
         assert!(!redacted.contains("secret"));
         assert!(redacted.contains("***"));
+    }
+
+    #[test]
+    fn boolean_and_port_parsing_rejects_malformed_values() {
+        assert!(parse_bool_value(None, "enabled", true).unwrap());
+        assert!(!parse_bool_value(None, "enabled", false).unwrap());
+        for raw in ["true", "1", "YES", "on"] {
+            assert!(parse_bool_value(Some(raw.into()), "enabled", false).unwrap());
+        }
+        for raw in ["false", "0", "NO", "off"] {
+            assert!(!parse_bool_value(Some(raw.into()), "enabled", true).unwrap());
+        }
+        assert!(parse_bool_value(Some("maybe".into()), "enabled", true).is_err());
+        for raw in ["x-2", "1-x", "65536-65536"] {
+            assert!(parse_port_range(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn database_credentials_use_embedded_values_and_do_not_leak_in_debug() {
+        let mut config = crate::test_support::config();
+        config.database_url = "jdbc:postgresql://localhost/colombo".into();
+        assert_eq!(
+            config.postgres_url().unwrap(),
+            "postgresql://colombo:colombo@localhost/colombo"
+        );
+        config.database_url = "postgresql://embedded:password@localhost/colombo".into();
+        assert_eq!(config.postgres_url().unwrap(), config.database_url);
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(":password@"));
+        config.database_url = "bad url".into();
+        assert!(config.postgres_url().is_err());
+        assert_eq!(redact_database_url("bad url"), "<invalid>");
+        assert_eq!(
+            redact_database_url("postgresql://localhost/colombo"),
+            "postgresql://localhost/colombo"
+        );
+        config.database_url = "mailto:somewhere".into();
+        assert!(config.postgres_url().is_err());
     }
 }

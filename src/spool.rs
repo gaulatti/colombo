@@ -344,11 +344,8 @@ impl Spool {
     pub fn try_lock(&self, operation_id: Uuid) -> Result<Option<File>> {
         let path = self.operation_dir(operation_id).join(LOCK_FILE);
         let file = private_open(&path)?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(file)),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-        }
+        let result = file.try_lock();
+        acquired_lock(file, result)
     }
 
     pub fn quarantine_content(&self, operation_id: Uuid) -> Result<()> {
@@ -474,6 +471,17 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
+fn acquired_lock(
+    file: File,
+    result: std::result::Result<(), std::fs::TryLockError>,
+) -> Result<Option<File>> {
+    match result {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut file = private_file(path)?;
     serde_json::to_writer(&mut file, value)?;
@@ -572,6 +580,138 @@ mod tests {
     }
 
     #[test]
+    fn failed_acceptance_never_leaves_recoverable_partial_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Spool::open(temp.path().join("spool")).unwrap();
+        let source = temp.path().join("source");
+        assert!(
+            spool
+                .accept(&session(), SourceProtocol::Http, "source", &source)
+                .is_err()
+        );
+        fs::write(&source, b"").unwrap();
+        assert!(
+            spool
+                .accept(&session(), SourceProtocol::Http, "source", &source)
+                .is_err()
+        );
+        let mut session = session();
+        session.upload = None;
+        assert!(
+            spool
+                .accept(&session, SourceProtocol::Http, "source", &source)
+                .is_err()
+        );
+        assert!(spool.operation_ids().unwrap().is_empty());
+        assert_eq!(fs::read_dir(spool.staging_dir()).unwrap().count(), 0);
+        fs::write(temp.path().join("not-directory"), b"x").unwrap();
+        assert!(Spool::open(temp.path().join("not-directory")).is_err());
+    }
+
+    #[test]
+    fn startup_and_scans_ignore_non_operations_and_clear_unaccepted_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("spool");
+        let spool = Spool::open(root.clone()).unwrap();
+        fs::write(spool.staging_dir().join("temporary"), b"partial").unwrap();
+        fs::write(spool.operations_dir().join("loose-file"), b"unrelated").unwrap();
+        fs::create_dir(spool.operations_dir().join("not-an-id")).unwrap();
+        let reopened = Spool::open(root).unwrap();
+        assert!(reopened.operation_ids().unwrap().is_empty());
+        assert_eq!(fs::read_dir(reopened.staging_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cleanup_and_atomic_updates_report_storage_failures_without_losing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Spool::open(temp.path().join("spool")).unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"content").unwrap();
+        let record = spool
+            .accept(&session(), SourceProtocol::Http, "source", &source)
+            .unwrap();
+        let mut private = spool.load_private(record.operation_id).unwrap();
+        private.validation_key = Some("updated".into());
+        spool.save_private(record.operation_id, &private).unwrap();
+        assert_eq!(
+            spool
+                .load_private(record.operation_id)
+                .unwrap()
+                .validation_key
+                .as_deref(),
+            Some("updated")
+        );
+        fs::write(spool.content_path(record.operation_id), b"changed").unwrap();
+        assert!(spool.verify_content(&record).is_err());
+        spool.quarantine_content(record.operation_id).unwrap();
+        spool.quarantine_content(record.operation_id).unwrap();
+        spool.delete_private_data(record.operation_id).unwrap();
+        spool.delete_private_data(record.operation_id).unwrap();
+        let private_path = spool.operation_dir(record.operation_id).join(PRIVATE_FILE);
+        fs::create_dir(&private_path).unwrap();
+        assert!(spool.delete_private_data(record.operation_id).is_err());
+        fs::remove_dir(&private_path).unwrap();
+        let bad_json = spool.operation_dir(record.operation_id).join(RECORD_FILE);
+        fs::write(&bad_json, b"bad json").unwrap();
+        assert!(spool.load_record(record.operation_id).is_err());
+        fs::remove_file(&bad_json).unwrap();
+        fs::create_dir(&bad_json).unwrap();
+        assert!(spool.save_record(&record).is_err());
+        assert_eq!(
+            fs::read_dir(spool.operation_dir(record.operation_id))
+                .unwrap()
+                .count(),
+            1
+        );
+        spool.remove_operation(record.operation_id).unwrap();
+        spool.remove_operation(record.operation_id).unwrap();
+        fs::write(spool.operation_dir(record.operation_id), b"file").unwrap();
+        assert!(spool.remove_operation(record.operation_id).is_err());
+        let q = spool
+            .quarantine_dir()
+            .join(format!("{}.content", record.operation_id));
+        fs::remove_file(&q).unwrap();
+        fs::create_dir(&q).unwrap();
+        assert!(spool.delete_quarantine(record.operation_id).is_err());
+        assert!(atomic_write_json(Path::new("/"), &record).is_err());
+    }
+
+    #[test]
+    fn retention_respects_locks_missing_expiry_and_future_deadlines() {
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Spool::open(temp.path().join("spool")).unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"content").unwrap();
+        let mut record = spool
+            .accept(&session(), SourceProtocol::Ftp, "source", &source)
+            .unwrap();
+        let lock = spool.try_lock(record.operation_id).unwrap().unwrap();
+        assert!(spool.maintain(Utc::now()).unwrap().is_empty());
+        drop(lock);
+        record.state = UploadState::Failed;
+        record.expires_at = None;
+        spool.save_record(&record).unwrap();
+        assert!(spool.maintain(Utc::now()).unwrap().is_empty());
+        record.expires_at = Some(Utc::now() + chrono::Duration::days(1));
+        spool.save_record(&record).unwrap();
+        assert!(spool.maintain(Utc::now()).unwrap().is_empty());
+        record.state = UploadState::Expired;
+        record.expires_at = None;
+        spool.save_record(&record).unwrap();
+        assert!(spool.maintain(Utc::now()).unwrap().is_empty());
+        record.expires_at = Some(Utc::now() + chrono::Duration::days(1));
+        spool.save_record(&record).unwrap();
+        assert!(spool.maintain(Utc::now()).unwrap().is_empty());
+        record.state = UploadState::Failed;
+        record.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        spool.save_record(&record).unwrap();
+        assert_eq!(
+            spool.maintain(Utc::now()).unwrap(),
+            vec![SourceProtocol::Ftp]
+        );
+    }
+
+    #[test]
     fn acceptance_atomically_persists_bytes_metadata_and_private_context() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.jpg");
@@ -635,6 +775,19 @@ mod tests {
         assert!(spool.try_lock(record.operation_id).unwrap().is_none());
         drop(first);
         assert!(spool.try_lock(record.operation_id).unwrap().is_some());
+        let file = private_open(&temp.path().join("unsupported-lock")).unwrap();
+        let failure = acquired_lock(
+            file,
+            Err(std::fs::TryLockError::Error(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "locking unsupported",
+            ))),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::Unsupported
+        );
     }
 
     #[test]

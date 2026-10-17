@@ -261,5 +261,131 @@ mod tests {
         }
         assert!(validate_target(&"x".repeat(256)).is_err());
         assert!(validate_target("bad\u{1}name").is_err());
+        assert!(
+            validate_target(&format!(
+                "{}/{}/{}/{}",
+                "a".repeat(230),
+                "b".repeat(230),
+                "c".repeat(230),
+                "d".repeat(230)
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn renderer_preserves_capture_time_case_and_placeholder_contracts() {
+        let now = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .to_utc();
+        let mut policy = UploadNamingPolicy {
+            version: 1,
+            assignment_slug: "News".into(),
+            path: vec![],
+            filename: vec![placeholder("sequence", None, Some(2))],
+            timezone: "UTC".into(),
+            capture_time_fallback: "reject".into(),
+            case_mode: "preserve".into(),
+        };
+        assert!(render(&policy, "key", "photo", None, now, 1).is_err());
+        assert_eq!(
+            render(&policy, "key", "photo", Some(now), now, 1).unwrap(),
+            "01"
+        );
+        for (name, format, expected) in [
+            ("assignmentSlug", None, "News"),
+            ("assignmentKey", None, "Key"),
+            ("originalStem", None, "My-photo"),
+            ("originalExtension", None, "jpg"),
+            ("capturedDate", Some("yyyy-MM-dd"), "2026-01-02"),
+            ("uploadedTime", Some("HHmmss"), "030405"),
+        ] {
+            policy.filename = vec![
+                placeholder(name, format, None),
+                placeholder("sequence", None, Some(2)),
+            ];
+            assert_eq!(
+                render(&policy, "Key", "My photo.JPG", Some(now), now, 1).unwrap(),
+                format!("{expected}01")
+            );
+        }
+        policy.filename = vec![
+            placeholder("originalExtension", None, None),
+            placeholder("sequence", None, Some(2)),
+        ];
+        policy.case_mode = "uppercase".into();
+        assert_eq!(
+            render(&policy, "key", "photo", Some(now), now, 1).unwrap(),
+            "BIN01"
+        );
+        policy.case_mode = "preserve".into();
+        for bad in [
+            UploadNamingSegment {
+                kind: "unknown".into(),
+                value: None,
+                name: None,
+                format: None,
+                width: None,
+            },
+            placeholder("unknown", None, None),
+            placeholder("capturedTime", None, None),
+            placeholder("sequence", None, None),
+            UploadNamingSegment {
+                kind: "placeholder".into(),
+                value: None,
+                name: None,
+                format: None,
+                width: None,
+            },
+        ] {
+            policy.filename = vec![bad, placeholder("sequence", None, Some(2))];
+            assert!(render(&policy, "key", "photo", Some(now), now, 1).is_err());
+        }
+        policy.filename = vec![
+            UploadNamingSegment {
+                kind: "literal".into(),
+                value: None,
+                name: None,
+                format: None,
+                width: None,
+            },
+            placeholder("sequence", None, Some(2)),
+        ];
+        assert_eq!(
+            render(&policy, "key", "photo", Some(now), now, 1).unwrap(),
+            "01"
+        );
+        policy.timezone = "invalid/zone".into();
+        assert!(render(&policy, "key", "photo", Some(now), now, 1).is_err());
+        policy.version = 2;
+        assert!(render(&policy, "key", "photo", Some(now), now, 1).is_err());
+        assert_eq!(sanitize("a  b_-.."), "a-b_");
+    }
+
+    #[test]
+    fn capture_time_reads_exif_and_rejects_missing_or_invalid_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("photo.tif");
+        assert_eq!(capture_time(&path), None);
+        std::fs::write(&path, b"not an image").unwrap();
+        assert_eq!(capture_time(&path), None);
+        let mut empty = b"II\x2a\0\x08\0\0\0".to_vec();
+        empty.extend_from_slice(&[0; 6]);
+        std::fs::write(&path, &empty).unwrap();
+        assert_eq!(capture_time(&path), None);
+        fn image(date: &[u8]) -> Vec<u8> {
+            let mut bytes=b"II\x2a\0\x08\0\0\0\x01\0\x69\x87\x04\0\x01\0\0\0\x1a\0\0\0\0\0\0\0\x01\0\x03\x90\x02\0\x14\0\0\0\x2c\0\0\0\0\0\0\0".to_vec();
+            let mut data = [0u8; 20];
+            data[..date.len()].copy_from_slice(date);
+            bytes.extend_from_slice(&data);
+            bytes
+        }
+        std::fs::write(&path, image(b"2026:01:02 03:04:05")).unwrap();
+        assert_eq!(
+            capture_time(&path).unwrap().to_rfc3339(),
+            "2026-01-02T03:04:05+00:00"
+        );
+        std::fs::write(&path, image(b"invalid date")).unwrap();
+        assert_eq!(capture_time(&path), None);
     }
 }

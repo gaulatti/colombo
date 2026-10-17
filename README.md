@@ -102,6 +102,18 @@ Useful commands:
 | `make package` | Build the release binary |
 | `make tenants` | Open the tenant CRUD CLI |
 
+`make test` and `make verify` start a disposable PostgreSQL test service on
+loopback port `55436`. Tests use separate schemas, fictional credentials, and
+local CMS/S3 servers. The local test database uses memory-backed storage. `make test-db-stop` removes that service and its data.
+CI provides the same PostgreSQL service. For a separately managed disposable
+database, run Cargo directly with `COLOMBO_TEST_DATABASE_URL` set explicitly.
+
+The tests exercise CMS failures, FTP session isolation, multipart streaming and
+disk failures, naming and EXIF metadata, durable recovery, bounded S3/callback
+retries, receipt isolation, and process startup/shutdown. HTTP temporary files
+remain owned until durable acceptance or rejection, including malformed trailing
+multipart input. Both HTTP and FTP listeners shut down on Ctrl+C.
+
 Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](https://github.com/gaulatti/colombo/wiki).
 
 ## Pull requests

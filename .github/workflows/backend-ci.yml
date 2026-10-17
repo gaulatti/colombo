@@ -30,11 +30,25 @@ concurrency:
 
 jobs:
   verify:
+    env:
+      RUST_TEST_THREADS: 4
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: colombo
+          POSTGRES_PASSWORD: colombo
+          POSTGRES_DB: colombo
+        ports:
+          - 55436:5432
+        options: >-
+          --health-cmd "pg_isready -U colombo -d colombo"
+          --health-interval 2s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,11 +77,12 @@ jobs:
           cargo +1.98.0 clippy --locked --all-targets --all-features -- -D warnings
       - name: Run all targets with branch instrumentation
         id: coverage
-        run: >-
-          cargo +nightly-2026-10-01 llvm-cov
-          --locked --all-targets --all-features --branch
-          --no-cfg-coverage --no-cfg-coverage-nightly
-          --json --output-path coverage.json
+        run: |
+          cargo +nightly-2026-10-01 llvm-cov clean --workspace
+          cargo +nightly-2026-10-01 llvm-cov \
+            --locked --all-targets --all-features --branch \
+            --no-cfg-coverage --no-cfg-coverage-nightly \
+            --json --output-path coverage.json
       - name: Run documentation tests
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Verify container boundary

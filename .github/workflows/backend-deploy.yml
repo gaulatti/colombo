@@ -19,7 +19,21 @@ on:
 
 jobs:
   build-and-push:
+    env:
+      RUST_TEST_THREADS: 4
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: colombo
+          POSTGRES_PASSWORD: colombo
+          POSTGRES_DB: colombo
+        ports:
+          - 55436:5432
+        options: >-
+          --health-cmd "pg_isready -U colombo -d colombo"
+          --health-interval 2s --health-timeout 5s --health-retries 20
     permissions:
       contents: read
       packages: write

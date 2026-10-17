@@ -4,8 +4,10 @@ SHELL := /bin/bash
 
 SESSION_NAME ?= colombo-dev
 CARGO := cargo
+# Keep database-backed fixtures bounded on smaller development and CI machines.
+export RUST_TEST_THREADS ?= 4
 
-.PHONY: help dev dev-attach dev-stop tenants run build test verify integration clean package docker-build docker-run
+.PHONY: help dev dev-attach dev-stop tenants run build test test-db test-db-stop verify integration clean package docker-build docker-run
 
 help:
 	@echo "Colombo CLI"
@@ -45,10 +47,16 @@ run:
 build:
 	@$(CARGO) build
 
-test:
+test-db:
+	@docker compose -p colombo-tests -f compose.test.yaml up -d --wait
+
+test-db-stop:
+	@docker compose -p colombo-tests -f compose.test.yaml down -v
+
+test: test-db
 	@$(CARGO) test --locked
 
-verify:
+verify: test-db
 	@$(CARGO) fmt --all -- --check
 	@$(CARGO) test --locked
 	@$(CARGO) clippy --all-targets --all-features -- -D warnings

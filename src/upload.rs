@@ -101,6 +101,26 @@ impl std::fmt::Debug for UploadService {
 }
 
 impl UploadService {
+    #[cfg(test)]
+    pub(crate) fn isolated(pool: PgPool, spool: Arc<Spool>) -> Arc<Self> {
+        let metrics = Metrics::new("test").unwrap();
+        let cms = CmsClient::new(metrics.clone()).unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        Arc::new(Self {
+            pool,
+            cms,
+            metrics,
+            spool,
+            sender,
+            scheduled: Arc::new(DashMap::new()),
+            pending: Arc::new(DashMap::new()),
+            recovered: Arc::new(DashMap::new()),
+            session_handles: Arc::new(DashMap::new()),
+            s3_slots: Arc::new(Semaphore::new(1)),
+            callback_slots: Arc::new(Semaphore::new(1)),
+        })
+    }
+
     pub async fn new(
         pool: PgPool,
         cms: CmsClient,
@@ -257,14 +277,16 @@ impl UploadService {
             loop {
                 tokio::select! {
                     _ = due_interval.tick() => service.schedule_due(),
-                    _ = scan_interval.tick() => {
-                        if let Err(error) = service.scan_and_schedule(false).await {
-                            error!(error = %error, "durable upload spool scan failed");
-                        }
-                    }
+                    _ = scan_interval.tick() => service.rescan().await,
                 }
             }
         });
+    }
+
+    async fn rescan(&self) {
+        if let Err(error) = self.scan_and_schedule(false).await {
+            error!(error = %error, "durable upload spool scan failed");
+        }
     }
 
     fn schedule_due(&self) {
@@ -433,9 +455,8 @@ impl UploadService {
             }
         }
 
-        if record.state == UploadState::Delivered {
-            self.deliver_callback(&mut record, &session).await?;
-        }
+        // Pending operations reach here only after persisted S3 delivery.
+        self.deliver_callback(&mut record, &session).await?;
         Ok(())
     }
 
@@ -861,6 +882,538 @@ mod tests {
     };
     use sqlx::postgres::PgPoolOptions;
 
+    #[tokio::test]
+    async fn legacy_log_consumers_receive_structured_acceptance_and_listener_events() {
+        if std::env::var_os("COLOMBO_LOG_FIXTURE_CHILD").is_none() {
+            let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","upload::tests::legacy_log_consumers_receive_structured_acceptance_and_listener_events"])
+                .env("COLOMBO_LOG_FIXTURE_CHILD","1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        struct Logger(std::sync::Mutex<Vec<String>>);
+        impl log::Log for Logger {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                self.0.lock().unwrap().push(record.args().to_string());
+            }
+            fn flush(&self) {}
+        }
+        static LOGGER: Logger = Logger(std::sync::Mutex::new(Vec::new()));
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let service = Arc::new(test_service(spool.clone()));
+        let record = spool
+            .accept(&session(), SourceProtocol::Http, "source", &source)
+            .unwrap();
+        service.observe_acceptance(&record);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = crate::test_support::config();
+        config.ftp_port = listener.local_addr().unwrap().port();
+        config.ftp_root = spool.root().join("ftp-incoming");
+        let passive = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = passive.local_addr().unwrap().port();
+        drop(passive);
+        config.passive_ports = port..=port;
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(1),
+            crate::ftp::serve(
+                config,
+                service.pool.clone(),
+                service.cms.clone(),
+                service.clone(),
+                service.metrics.clone(),
+            ),
+        )
+        .await;
+        let state = crate::http::AppState {
+            pool: service.pool.clone(),
+            cms: service.cms.clone(),
+            uploads: service.clone(),
+            metrics: service.metrics.clone(),
+            metrics_token: Arc::from(""),
+        };
+        let http = tokio::spawn(crate::http::serve(0, state));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-INT", &std::process::id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(StdDuration::from_secs(2), http)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let messages = LOGGER.0.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("upload durably accepted"))
+        );
+        assert!(messages.iter().any(|m| m.contains("FTP listener ready")));
+        assert!(messages.iter().any(|m| m.contains("HTTP listener ready")));
+        log::logger().flush();
+    }
+
+    #[tokio::test]
+    async fn invalid_targets_and_incomplete_delivery_metadata_fail_explicitly() {
+        use crate::{
+            domain::{UploadNamingPolicy, UploadNamingSegment},
+            test_support,
+        };
+        let mock = test_support::Mock::new(vec![(200, r#"{"sequence":7}"#.into())]).await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let service = test_service(spool.clone());
+        let mut session = test_support::session(&mock.url);
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "original.jpg", &source)
+            .unwrap();
+        let mut private = spool.load_private(record.operation_id).unwrap();
+        record.upload_attempts = UPLOAD_ATTEMPT_LIMIT;
+        assert!(matches!(
+            service
+                .deliver_to_s3(&mut record, &mut private, &mut session)
+                .await,
+            Err(StageFailure::Transient(_))
+        ));
+        assert!(matches!(
+            service.put_attempt(&record, &session).await,
+            Err(UploadFailure::Other(_))
+        ));
+        record.object_bucket = Some("uploads".into());
+        assert!(matches!(
+            service.put_attempt(&record, &session).await,
+            Err(UploadFailure::Other(_))
+        ));
+        session.upload = None;
+        assert!(service.resolve_target(&record, &session).await.is_err());
+        assert!(matches!(
+            service.put_attempt(&record, &session).await,
+            Err(UploadFailure::Other(_))
+        ));
+        session = test_support::session(&mock.url);
+        let upload = session.upload.as_mut().unwrap();
+        upload.sequence_endpoint = Some("/sequence".into());
+        upload.naming_policy = Some(UploadNamingPolicy {
+            version: 1,
+            assignment_slug: "news".into(),
+            path: vec![],
+            filename: vec![UploadNamingSegment {
+                kind: "placeholder".into(),
+                value: None,
+                name: Some("sequence".into()),
+                format: None,
+                width: Some(4),
+            }],
+            timezone: "UTC".into(),
+            capture_time_fallback: "uploadedTime".into(),
+            case_mode: "preserve".into(),
+        });
+        assert_eq!(
+            service.resolve_target(&record, &session).await.unwrap(),
+            "0007"
+        );
+        session
+            .upload
+            .as_mut()
+            .unwrap()
+            .naming_policy
+            .as_mut()
+            .unwrap()
+            .version = 2;
+        assert!(service.resolve_target(&record, &session).await.is_err());
+        service
+            .handle_upload_failure(&mut record, StageFailure::Invalid)
+            .await
+            .unwrap();
+        assert_eq!(
+            spool.load_record(record.operation_id).unwrap().failure_code,
+            Some(FailureCode::InvalidMetadata)
+        );
+        // Local body setup fails before any request can reach an AWS endpoint.
+        let missing = put_s3(
+            session.upload.as_ref().unwrap(),
+            "image/jpeg",
+            &temp.path().join("missing"),
+            "uploads",
+            "key",
+        )
+        .await;
+        assert!(matches!(missing, Err(UploadFailure::Other(_))));
+    }
+
+    #[tokio::test]
+    async fn spool_scans_expire_receipts_and_count_delivered_due_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let mut service = test_service(spool.clone());
+        let (sender, mut receiver) = mpsc::channel(4);
+        service.sender = sender;
+        let mut terminal = spool
+            .accept(&session(), SourceProtocol::Http, "expired", &source)
+            .unwrap();
+        terminal.state = UploadState::CallbackConfirmed;
+        terminal.expires_at = Some(Utc::now() - Duration::seconds(1));
+        spool.save_record(&terminal).unwrap();
+        let mut pending = spool
+            .accept(&session(), SourceProtocol::Ftp, "pending", &source)
+            .unwrap();
+        pending.state = UploadState::Delivered;
+        spool.save_record(&pending).unwrap();
+        service.scan_and_schedule(true).await.unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), pending.operation_id);
+        assert_eq!(
+            service
+                .metrics
+                .upload_queue_depth
+                .with_label_values(&["cms_callback"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            service
+                .metrics
+                .spool_outcomes
+                .with_label_values(&["http", "expired"])
+                .get(),
+            1
+        );
+        service.scan_and_schedule(true).await.unwrap();
+        assert_eq!(
+            service
+                .metrics
+                .spool_outcomes
+                .with_label_values(&["ftp", "recovered"])
+                .get(),
+            1
+        );
+        service.scan_and_schedule(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failure_cleanup_is_best_effort_but_always_persists_the_terminal_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let service = test_service(spool.clone());
+        let mut record = spool
+            .accept(&session(), SourceProtocol::Ftp, "source", &source)
+            .unwrap();
+        let quarantine = spool
+            .root()
+            .join("quarantine")
+            .join(format!("{}.content", record.operation_id));
+        std::fs::create_dir(&quarantine).unwrap();
+        let private = spool
+            .root()
+            .join("operations")
+            .join(record.operation_id.to_string())
+            .join("private.json");
+        std::fs::remove_file(&private).unwrap();
+        std::fs::create_dir(&private).unwrap();
+        service
+            .fail(&mut record, FailureCode::DependencyDenied)
+            .await
+            .unwrap();
+        assert_eq!(
+            spool.load_record(record.operation_id).unwrap().state,
+            UploadState::Failed
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acceptance_survives_an_unremovable_ftp_ingress_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let ingress = temp.path().join("ingress");
+        std::fs::create_dir(&ingress).unwrap();
+        let source = ingress.join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let service = Arc::new(test_service(spool.clone()));
+        let session = SessionHandle::new(session());
+        std::fs::set_permissions(&ingress, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let accepted = service
+            .accept_ftp(session, "source".into(), source.clone())
+            .await;
+        std::fs::set_permissions(&ingress, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let id = accepted.unwrap();
+        assert!(source.exists());
+        spool
+            .verify_content(&spool.load_record(id).unwrap())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_s3_delivery_retries_refreshes_and_callbacks_preserve_durable_state() {
+        use crate::test_support;
+        let endpoint = match std::env::var("COLOMBO_S3_FIXTURE_ENDPOINT") {
+            Ok(url) => url,
+            Err(_) => {
+                let mock = test_support::Mock::new(vec![(200, String::new())]).await;
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact","upload::tests::local_s3_delivery_retries_refreshes_and_callbacks_preserve_durable_state","--nocapture"])
+                    .env("COLOMBO_S3_FIXTURE_ENDPOINT",&mock.url).env("AWS_ENDPOINT_URL_S3",&mock.url)
+                    .env("AWS_EC2_METADATA_DISABLED","true").env("AWS_MAX_ATTEMPTS","1");
+                let status = tokio::task::spawn_blocking(move || command.status().unwrap())
+                    .await
+                    .unwrap();
+                assert!(status.success());
+                return;
+            }
+        };
+        async fn replies(endpoint: &str, values: Vec<(u16, String)>) {
+            assert!(
+                reqwest::Client::new()
+                    .post(format!("{endpoint}/__control"))
+                    .json(&values)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+        }
+        fn s3_error(code: &str) -> String {
+            format!(
+                "<Error><Code>{code}</Code><Message>fixture</Message><RequestId>test</RequestId></Error>"
+            )
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let source = temp.path().join("source.jpg");
+        std::fs::write(&source, b"durable media").unwrap();
+        let pool = test_support::database().await;
+        let mut session = test_support::session(&endpoint);
+        test_support::seed(&pool, &session).await;
+        let mut service = test_service(spool.clone());
+        service.pool = pool;
+        assert!(format!("{service:?}").contains("UploadService"));
+        let record = spool
+            .accept(&session, SourceProtocol::Http, "source.jpg", &source)
+            .unwrap();
+        replies(&endpoint, vec![(200, String::new())]).await;
+        service.process(record.operation_id).await.unwrap();
+        let complete = spool.load_record(record.operation_id).unwrap();
+        assert_eq!(complete.state, UploadState::CallbackConfirmed);
+        assert_eq!(complete.upload_attempts, 1);
+        assert_eq!(complete.callback_attempts, 1);
+        assert_eq!(
+            complete.object_key.as_deref(),
+            Some("assignment-123/source.jpg")
+        );
+        assert!(spool.load_private(record.operation_id).is_err());
+        service.process(record.operation_id).await.unwrap();
+
+        // The same stable key survives both retryable S3 failure and a later successful delivery.
+        for (status, code, failure) in [
+            (403, "AccessDenied", FailureCode::DependencyDenied),
+            (400, "AccessDenied", FailureCode::DependencyDenied),
+            (500, "InternalError", FailureCode::RetryExhausted),
+            (403, "ExpiredToken", FailureCode::DependencyDenied),
+        ] {
+            let mut record = spool
+                .accept(&session, SourceProtocol::Ftp, "source.jpg", &source)
+                .unwrap();
+            let handle = SessionHandle::new(session.clone());
+            service
+                .session_handles
+                .insert(record.operation_id, Arc::downgrade(&handle));
+            if code == "InternalError" {
+                record.upload_attempts = UPLOAD_ATTEMPT_LIMIT - 1;
+                spool.save_record(&record).unwrap();
+            }
+            if code == "ExpiredToken" {
+                let mut private = spool.load_private(record.operation_id).unwrap();
+                private.validation_key = None;
+                spool.save_private(record.operation_id, &private).unwrap();
+            }
+            replies(&endpoint, vec![(status, s3_error(code))]).await;
+            service.process(record.operation_id).await.unwrap();
+            let failed = spool.load_record(record.operation_id).unwrap();
+            assert_eq!(failed.state, UploadState::Failed);
+            assert_eq!(failed.failure_code, Some(failure));
+            assert_eq!(handle.is_valid(), failure != FailureCode::DependencyDenied);
+        }
+        let mut expired = spool
+            .accept(
+                &session,
+                SourceProtocol::Http,
+                "expired-budget.jpg",
+                &source,
+            )
+            .unwrap();
+        expired.upload_attempts = UPLOAD_ATTEMPT_LIMIT - 1;
+        spool.save_record(&expired).unwrap();
+        replies(&endpoint, vec![(403, s3_error("ExpiredToken"))]).await;
+        service.process(expired.operation_id).await.unwrap();
+        assert_eq!(
+            spool
+                .load_record(expired.operation_id)
+                .unwrap()
+                .failure_code,
+            Some(FailureCode::RetryExhausted)
+        );
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "retry.jpg", &source)
+            .unwrap();
+        replies(&endpoint, vec![(500, s3_error("InternalError"))]).await;
+        service.process(record.operation_id).await.unwrap();
+        record = spool.load_record(record.operation_id).unwrap();
+        assert_eq!(record.state, UploadState::Accepted);
+        assert!(record.next_attempt_at > Utc::now());
+        let key = record.object_key.clone();
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool
+                .load_record(record.operation_id)
+                .unwrap()
+                .upload_attempts,
+            1
+        );
+        record.next_attempt_at = Utc::now();
+        spool.save_record(&record).unwrap();
+        replies(&endpoint, vec![(200, String::new()), (503, String::new())]).await;
+        service.process(record.operation_id).await.unwrap();
+        record = spool.load_record(record.operation_id).unwrap();
+        assert_eq!(record.state, UploadState::Delivered);
+        assert_eq!(record.object_key, key);
+        record.next_attempt_at = Utc::now();
+        spool.save_record(&record).unwrap();
+        replies(&endpoint, vec![(204, String::new())]).await;
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool.load_record(record.operation_id).unwrap().state,
+            UploadState::CallbackConfirmed
+        );
+
+        for (validation_status, mut fresh, expected) in [
+            (
+                200,
+                test_support::session(&endpoint),
+                UploadState::CallbackConfirmed,
+            ),
+            (
+                200,
+                {
+                    let mut s = test_support::session(&endpoint);
+                    s.assignment_id = "other-assignment".into();
+                    s
+                },
+                UploadState::Failed,
+            ),
+            (401, test_support::session(&endpoint), UploadState::Failed),
+            (503, test_support::session(&endpoint), UploadState::Accepted),
+        ] {
+            let record = spool
+                .accept(&session, SourceProtocol::Ftp, "refresh.jpg", &source)
+                .unwrap();
+            let handle = SessionHandle::new(session.clone());
+            service
+                .session_handles
+                .insert(record.operation_id, Arc::downgrade(&handle));
+            fresh.upload.as_mut().unwrap().access_key_id = "fresh-access".into();
+            replies(
+                &endpoint,
+                vec![
+                    (403, s3_error("ExpiredToken")),
+                    (validation_status, test_support::validation(&fresh)),
+                    (200, String::new()),
+                ],
+            )
+            .await;
+            service.process(record.operation_id).await.unwrap();
+            assert_eq!(
+                spool.load_record(record.operation_id).unwrap().state,
+                expected
+            );
+            if expected == UploadState::CallbackConfirmed {
+                assert_eq!(
+                    handle.snapshot().await.upload.unwrap().access_key_id,
+                    "fresh-access"
+                );
+            }
+        }
+        // A refreshed credential that remains expired schedules a bounded retry.
+        let record = spool
+            .accept(&session, SourceProtocol::Http, "expired.jpg", &source)
+            .unwrap();
+        replies(
+            &endpoint,
+            vec![
+                (403, s3_error("ExpiredToken")),
+                (200, test_support::validation(&session)),
+                (403, s3_error("InvalidToken")),
+            ],
+        )
+        .await;
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool.load_record(record.operation_id).unwrap().state,
+            UploadState::Accepted
+        );
+
+        for (status, attempts, expected) in [
+            (403, 0, FailureCode::DependencyDenied),
+            (503, CALLBACK_ATTEMPT_LIMIT - 1, FailureCode::RetryExhausted),
+            (200, CALLBACK_ATTEMPT_LIMIT, FailureCode::RetryExhausted),
+        ] {
+            let mut record = spool
+                .accept(&session, SourceProtocol::Http, "callback.jpg", &source)
+                .unwrap();
+            record.state = UploadState::Delivered;
+            record.target_filename = Some("callback.jpg".into());
+            record.s3_url = Some("s3://uploads/key".into());
+            record.callback_attempts = attempts;
+            spool.save_record(&record).unwrap();
+            replies(&endpoint, vec![(status, String::new())]).await;
+            service.process(record.operation_id).await.unwrap();
+            assert_eq!(
+                spool.load_record(record.operation_id).unwrap().failure_code,
+                Some(expected)
+            );
+        }
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "metadata.jpg", &source)
+            .unwrap();
+        record.state = UploadState::Delivered;
+        spool.save_record(&record).unwrap();
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool.load_record(record.operation_id).unwrap().failure_code,
+            Some(FailureCode::InvalidMetadata)
+        );
+        session.upload.as_mut().unwrap().key_prefix.push('/');
+        let record = spool
+            .accept(&session, SourceProtocol::Http, "slash.jpg", &source)
+            .unwrap();
+        replies(&endpoint, vec![(200, String::new())]).await;
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool
+                .load_record(record.operation_id)
+                .unwrap()
+                .object_key
+                .as_deref(),
+            Some("assignment-123/slash.jpg")
+        );
+    }
+
     fn session() -> SessionData {
         SessionData {
             tenant: Tenant {
@@ -914,8 +1467,173 @@ mod tests {
         assert_eq!(UPLOAD_ATTEMPT_LIMIT, 5);
         assert_eq!(CALLBACK_ATTEMPT_LIMIT, 5);
         assert_eq!(retry_delay(1), Duration::seconds(1));
+        assert_eq!(retry_delay(0), Duration::seconds(1));
+        assert_eq!(retry_delay(2), Duration::seconds(5));
+        assert_eq!(retry_delay(3), Duration::seconds(30));
         assert_eq!(retry_delay(4), Duration::minutes(2));
         assert_eq!(retry_delay(5), Duration::minutes(5));
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_missing_tenants_context_and_corrupt_content() {
+        use crate::test_support;
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let source = temp.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        let pool = test_support::database().await;
+        let session = test_support::session("http://unused");
+        test_support::seed(&pool, &session).await;
+        let mut service = test_service(spool.clone());
+        service.pool = pool;
+        for code in [
+            FailureCode::InvalidMetadata,
+            FailureCode::TenantMissing,
+            FailureCode::CorruptContent,
+        ] {
+            let mut record = spool
+                .accept(&session, SourceProtocol::Http, "source", &source)
+                .unwrap();
+            match code {
+                FailureCode::InvalidMetadata => std::fs::remove_file(
+                    spool
+                        .root()
+                        .join("operations")
+                        .join(record.operation_id.to_string())
+                        .join("private.json"),
+                )
+                .unwrap(),
+                FailureCode::TenantMissing => {
+                    record.tenant_id = 99;
+                    spool.save_record(&record).unwrap();
+                }
+                _ => std::fs::write(spool.content_path(record.operation_id), b"corrupt").unwrap(),
+            }
+            service.process(record.operation_id).await.unwrap();
+            assert_eq!(
+                spool.load_record(record.operation_id).unwrap().failure_code,
+                Some(code)
+            );
+        }
+        let mut record = spool
+            .accept(&session, SourceProtocol::Http, "locked", &source)
+            .unwrap();
+        let lock = spool.try_lock(record.operation_id).unwrap().unwrap();
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool
+                .load_record(record.operation_id)
+                .unwrap()
+                .upload_attempts,
+            0
+        );
+        drop(lock);
+        record.next_attempt_at = Utc::now() + Duration::minutes(1);
+        spool.save_record(&record).unwrap();
+        service.process(record.operation_id).await.unwrap();
+        assert_eq!(
+            spool
+                .load_record(record.operation_id)
+                .unwrap()
+                .upload_attempts,
+            0
+        );
+        for (tenant, assignment) in [
+            (99, session.assignment_id.clone()),
+            (session.tenant.id, "wrong".into()),
+        ] {
+            assert!(
+                service
+                    .receipt_for_assignment(record.operation_id, tenant, assignment)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            service
+                .receipt_for_assignment(Uuid::new_v4(), 1, "assignment-123".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(
+            spool
+                .root()
+                .join("operations")
+                .join(record.operation_id.to_string())
+                .join("record.json"),
+            b"invalid",
+        )
+        .unwrap();
+        assert!(
+            service
+                .receipt_for_assignment(record.operation_id, 1, "assignment-123".into())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn background_workers_release_reservations_and_scheduler_survives_scan_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let spool = Arc::new(Spool::open(temp.path().join("spool")).unwrap());
+        let service = Arc::new(test_service(spool.clone()));
+        let (sender, receiver) = mpsc::channel(2);
+        service.start_workers(receiver);
+        let missing = Uuid::new_v4();
+        service.scheduled.insert(missing, ());
+        sender.send(missing).await.unwrap();
+        for _ in 0..100 {
+            if !service.scheduled.contains_key(&missing) {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(1)).await;
+        }
+        assert!(!service.scheduled.contains_key(&missing));
+        let source = temp.path().join("terminal");
+        std::fs::write(&source, b"content").unwrap();
+        let mut record = spool
+            .accept(&session(), SourceProtocol::Http, "terminal", &source)
+            .unwrap();
+        record.state = UploadState::CallbackConfirmed;
+        spool.save_record(&record).unwrap();
+        service.scheduled.insert(record.operation_id, ());
+        sender.send(record.operation_id).await.unwrap();
+        for _ in 0..100 {
+            if !service.scheduled.contains_key(&record.operation_id) {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(1)).await;
+        }
+        assert!(!service.scheduled.contains_key(&record.operation_id));
+        drop(sender);
+        let operations = spool.root().join("operations");
+        let saved = spool.root().join("saved-operations");
+        std::fs::rename(&operations, &saved).unwrap();
+        service.rescan().await;
+        tokio::time::pause();
+        service.start_scheduler();
+        tokio::task::spawn_blocking(|| std::thread::sleep(StdDuration::from_millis(30)))
+            .await
+            .unwrap();
+        tokio::time::advance(StdDuration::from_secs(61)).await;
+        tokio::task::spawn_blocking(|| std::thread::sleep(StdDuration::from_millis(30)))
+            .await
+            .unwrap();
+        std::fs::rename(saved, operations).unwrap();
+        tokio::time::advance(StdDuration::from_secs(61)).await;
+        tokio::task::spawn_blocking(|| std::thread::sleep(StdDuration::from_millis(30)))
+            .await
+            .unwrap();
+        let mut service_with_receiver = test_service(spool);
+        let (sender, mut receiver) = mpsc::channel(1);
+        service_with_receiver.sender = sender;
+        let id = Uuid::new_v4();
+        service_with_receiver.enqueue(id);
+        service_with_receiver.enqueue(id);
+        assert_eq!(receiver.try_recv().unwrap(), id);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

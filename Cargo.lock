@@ -882,6 +882,7 @@ dependencies = [
  "http-body-util",
  "kamadak-exif",
  "libunftp",
+ "log",
  "mime_guess",
  "prometheus",
  "reqwest",
