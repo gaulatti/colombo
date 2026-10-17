@@ -3,23 +3,59 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct Database {
+    url: String,
+    schema: String,
+    admin: sqlx::PgPool,
+    pool: sqlx::PgPool,
+}
+impl Database {
+    async fn new() -> Self {
+        let database = std::env::var("COLOMBO_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://colombo:colombo@127.0.0.1:55436/colombo".into());
+        let admin = sqlx::PgPool::connect(&database).await.unwrap();
+        let schema = format!("runtime_{}", uuid::Uuid::new_v4().simple());
+        // Only a generated UUID enters this SQL identifier.
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&database).unwrap();
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        let pool = sqlx::PgPool::connect(url.as_str()).await.unwrap();
+        Self {
+            url: url.into(),
+            schema,
+            admin,
+            pool,
+        }
+    }
+    async fn close(self) {
+        self.pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA {} CASCADE",
+            self.schema
+        )))
+        .execute(&self.admin)
+        .await
+        .unwrap();
+        self.admin.close().await;
+    }
+}
+
 struct Runtime {
     child: Child,
     _temp: tempfile::TempDir,
 }
 impl Runtime {
-    fn start(settings: &[(&str, &str)]) -> Self {
+    fn start(database: &Database, settings: &[(&str, &str)]) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_colombo"));
         command
             .current_dir(temp.path())
             .env_clear()
-            .env(
-                "DATABASE_URL",
-                std::env::var("COLOMBO_TEST_DATABASE_URL").unwrap_or_else(|_| {
-                    "postgres://colombo:colombo@127.0.0.1:55436/colombo".into()
-                }),
-            )
+            .env("DATABASE_URL", &database.url)
             .env("COLOMBO_FTP_ENABLED", "false")
             .env("COLOMBO_SPOOL_PATH", temp.path().join("spool"))
             .env("TMPDIR", temp.path())
@@ -58,8 +94,9 @@ impl Drop for Runtime {
     }
 }
 
-#[test]
-fn invalid_configuration_exits_without_starting_listeners() {
+#[tokio::test]
+async fn invalid_configuration_exits_without_starting_listeners() {
+    let database = Database::new().await;
     for settings in [
         vec![("PORT", "invalid")],
         vec![("COLOMBO_FTP_PORT", "invalid")],
@@ -82,7 +119,7 @@ fn invalid_configuration_exits_without_starting_listeners() {
         ],
     ] {
         assert!(
-            !Runtime::start(&settings).wait().success(),
+            !Runtime::start(&database, &settings).wait().success(),
             "accepted invalid config {settings:?}"
         );
     }
@@ -90,15 +127,17 @@ fn invalid_configuration_exits_without_starting_listeners() {
     let port = occupied.local_addr().unwrap().port().to_string();
     for ftp in ["false", "true"] {
         assert!(
-            !Runtime::start(&[("PORT", &port), ("COLOMBO_FTP_ENABLED", ftp)])
+            !Runtime::start(&database, &[("PORT", &port), ("COLOMBO_FTP_ENABLED", ftp)])
                 .wait()
                 .success()
         );
     }
+    database.close().await;
 }
 
 #[tokio::test]
 async fn http_process_starts_serves_and_shuts_down_cleanly() {
+    let database = Database::new().await;
     for ftp_mode in ["disabled", "plain", "tls"] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
@@ -158,7 +197,7 @@ async fn http_process_starts_serves_and_shuts_down_cleanly() {
                 ("COLOMBO_FTP_PASSIVE_EXTERNAL_ADDRESS", "127.0.0.1"),
             ]);
         }
-        let mut runtime = Runtime::start(&settings);
+        let mut runtime = Runtime::start(&database, &settings);
         let client = reqwest::Client::new();
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -196,27 +235,30 @@ async fn http_process_starts_serves_and_shuts_down_cleanly() {
         );
         assert!(runtime.wait().success());
     }
+    database.close().await;
 }
 
 #[tokio::test]
 async fn unavailable_temporary_storage_rejects_authenticated_uploads() {
-    let database = std::env::var("COLOMBO_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://colombo:colombo@127.0.0.1:55436/colombo".into());
-    let pool = sqlx::PgPool::connect(&database).await.unwrap();
-    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let database = Database::new().await;
+    let pool = &database.pool;
+    sqlx::migrate!("./migrations").run(pool).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let mock = tokio::spawn(async move {
         axum::serve(listener,axum::Router::new().route("/validate",axum::routing::post(||async {axum::Json(serde_json::json!({"assignmentId":"runtime-fixture","upload":{"accessKeyId":"access","secretAccessKey":"secret","sessionToken":"token","region":"us-east-1","bucket":"uploads","keyPrefix":"runtime-fixture","expiresAt":"2099-01-01T00:00:00Z"}}))}))).await.unwrap()
     });
-    sqlx::query("INSERT INTO tenants(name,ftp_username,api_key,validation_endpoint,photo_endpoint) VALUES ('Runtime fixture','runtime-fixture','fictional-key',$1,$1) ON CONFLICT (ftp_username) DO UPDATE SET validation_endpoint=EXCLUDED.validation_endpoint")
-        .bind(format!("{url}/validate")).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tenants(name,ftp_username,api_key,validation_endpoint,photo_endpoint) VALUES ('Runtime fixture','runtime-fixture','fictional-key',$1,$1)")
+        .bind(format!("{url}/validate")).execute(pool).await.unwrap();
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = socket.local_addr().unwrap().port().to_string();
     drop(socket);
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing");
-    let mut runtime = Runtime::start(&[("PORT", &port), ("TMPDIR", missing.to_str().unwrap())]);
+    let mut runtime = Runtime::start(
+        &database,
+        &[("PORT", &port), ("TMPDIR", missing.to_str().unwrap())],
+    );
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -242,12 +284,15 @@ async fn unavailable_temporary_storage_rejects_authenticated_uploads() {
             .success()
     );
     assert!(runtime.wait().success());
-    let mut accepted_runtime = Runtime::start(&[
-        ("PORT", &port),
-        ("AWS_ENDPOINT_URL_S3", &url),
-        ("AWS_EC2_METADATA_DISABLED", "true"),
-        ("AWS_MAX_ATTEMPTS", "1"),
-    ]);
+    let mut accepted_runtime = Runtime::start(
+        &database,
+        &[
+            ("PORT", &port),
+            ("AWS_ENDPOINT_URL_S3", &url),
+            ("AWS_EC2_METADATA_DISABLED", "true"),
+            ("AWS_MAX_ATTEMPTS", "1"),
+        ],
+    );
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok(response) = client
@@ -289,8 +334,5 @@ async fn unavailable_temporary_storage_rejects_authenticated_uploads() {
     );
     assert!(accepted_runtime.wait().success());
     mock.abort();
-    sqlx::query("DELETE FROM tenants WHERE ftp_username='runtime-fixture'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    database.close().await;
 }

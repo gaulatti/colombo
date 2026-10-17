@@ -54,12 +54,13 @@ test-db-stop:
 	@docker compose -p colombo-tests -f compose.test.yaml down -v
 
 test: test-db
-	@$(CARGO) test --locked
+	@trap '$(MAKE) test-db-stop' EXIT; $(CARGO) test --locked
 
 verify: test-db
-	@$(CARGO) fmt --all -- --check
-	@$(CARGO) test --locked
-	@$(CARGO) clippy --all-targets --all-features -- -D warnings
+	@trap '$(MAKE) test-db-stop' EXIT; \
+	  $(CARGO) fmt --all -- --check && \
+	  $(CARGO) test --locked && \
+	  $(CARGO) clippy --all-targets --all-features -- -D warnings
 
 integration:
 	@./tests/e2e.sh

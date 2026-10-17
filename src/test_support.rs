@@ -61,6 +61,7 @@ pub async fn database() -> PgPool {
         log::set_max_level(log::LevelFilter::Info);
         log::logger().flush();
     });
+    // Schemas live only for the disposable database lifetime; Make and CI remove it.
     // The identifier contains only a fixed prefix and a generated UUID, never external input.
     let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
     let admin = PgPoolOptions::new()

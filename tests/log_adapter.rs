@@ -38,9 +38,10 @@ async fn library_users_without_a_tracing_subscriber_receive_operational_logs() {
         .execute(&admin)
         .await
         .unwrap();
+    let pool_schema = schema.clone();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .after_connect(move |conn, _| {
-            let sql = format!("SET search_path TO {schema}");
+            let sql = format!("SET search_path TO {pool_schema}");
             Box::pin(async move {
                 sqlx::query(sqlx::AssertSqlSafe(sql)).execute(conn).await?;
                 Ok(())
@@ -182,4 +183,9 @@ async fn library_users_without_a_tracing_subscriber_receive_operational_logs() {
     drop(messages);
     mock.abort();
     log::logger().flush();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }

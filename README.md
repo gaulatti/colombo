@@ -104,7 +104,8 @@ Useful commands:
 
 `make test` and `make verify` start a disposable PostgreSQL test service on
 loopback port `55436`. Tests use separate schemas, fictional credentials, and
-local CMS/S3 servers. The local test database uses memory-backed storage. `make test-db-stop` removes that service and its data.
+local CMS/S3 servers. The local test database uses memory-backed storage. Both
+commands remove it on exit; `make test-db-stop` removes a manually started service.
 CI provides the same PostgreSQL service. For a separately managed disposable
 database, run Cargo directly with `COLOMBO_TEST_DATABASE_URL` set explicitly.
 

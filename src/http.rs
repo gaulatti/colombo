@@ -59,12 +59,16 @@ async fn root() -> Response {
         .expect("static redirect response")
 }
 
-pub async fn serve(port: u16, state: AppState) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, "HTTP listener ready");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+pub async fn serve(port: u16, state: AppState) -> anyhow::Result<()> {
+    async {
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+        tracing::info!(port, "HTTP listener ready");
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    }
+    .await
+    .map_err(anyhow::Error::from)
 }
 
 async fn shutdown_signal() {
