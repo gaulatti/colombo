@@ -79,7 +79,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
-        uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         with:
           operation: test
       - name: Rust format and lint
@@ -97,7 +97,7 @@ jobs:
       - name: Run documentation tests
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
-        uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         with:
           operation: coverage
           coverage-report: coverage.json
@@ -118,12 +118,9 @@ jobs:
           if-no-files-found: error
 
   assess-intent:
-    if: >-
-      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft) ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/approve-intent ')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && !inputs.check_provider)
+    if: github.event_name == 'pull_request_target' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 70
     permissions:
       actions: read
       contents: read
@@ -132,22 +129,25 @@ jobs:
     outputs:
       assessment: ${{ steps.assess.outputs.assessment }}
     steps:
-      # Never load the controller from the PR or a manually selected branch.
+      # Never load the controller or its configuration from the PR.
       - uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         id: assess
         with:
           operation: assess
+          wait-for-verification: 'true'
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
-          pull-request: ${{ inputs.pull_request }}
 
   approve-and-merge:
+    name: ${{ github.event_name == 'pull_request_target' && 'approve-and-merge' || 'metadata-only-approval' }}
     needs: assess-intent
+    # A failed assessment must fail this required job rather than skip it.
+    if: always() && github.event_name == 'pull_request_target' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
@@ -155,17 +155,59 @@ jobs:
       checks: write
       actions: write
     concurrency:
-      group: pr-approval-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request }}
+      group: pr-approval-${{ github.event.pull_request.number }}
       cancel-in-progress: false
+    steps:
+      - name: Require a completed assessment
+        if: needs.assess-intent.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+        with:
+          operation: gate
+          native-gate: 'true'
+          assessment: ${{ needs.assess-intent.outputs.assessment }}
+
+  finalize-merge:
+    needs: [assess-intent, approve-and-merge]
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         with:
-          operation: gate
+          operation: finalize
           assessment: ${{ needs.assess-intent.outputs.assessment }}
+
+  request-reassessment:
+    if: >-
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/approve-intent ')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && !inputs.check_provider)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+        with:
+          operation: request-reassessment
           pull-request: ${{ inputs.pull_request }}
 
   check-provider:
@@ -174,12 +216,12 @@ jobs:
     timeout-minutes: 7
     permissions: {}
     steps:
-      - uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         with:
           operation: check-provider
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Evaluate repository fit and test integrity with the live model
-        uses: gaulatti/clouseau@b067a1baba99355d6c086519088ac7b96eef55f9
+        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
         with:
           operation: evaluate-review
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}

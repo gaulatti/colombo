@@ -121,7 +121,7 @@ Full architecture, configuration, CMS contracts, deployment, and tenant administ
 
 The Backend CI workflow uses the public [Clouseau](https://github.com/gaulatti/clouseau)
 action, pinned to a reviewed commit. It requires all tests and exactly 100% line and branch
-coverage of Colombo's application sources. It arms auto-merge and approves only
+coverage of Colombo's application sources. The required native approval job arms auto-merge and approves only
 the verified PR revision. DeepSeek Flash assesses repository purpose, supported
 intent, and meaningful test evidence using the contract, tickets, and precedent.
 Coverage improvements and in-scope maintenance have no file/line cutoff. Product
@@ -134,7 +134,7 @@ Each repository keeps its [review contract](.github/clouseau.md) and
 [configuration](.github/clouseau.json); shared review rules live in Clouseau.
 Private bastille access is unnecessary for contributors or CI.
 
-See the [shared review policy](https://github.com/gaulatti/clouseau/blob/b067a1baba99355d6c086519088ac7b96eef55f9/policy/intent-review.md) and
+See the [shared review policy](https://github.com/gaulatti/clouseau/blob/f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1/policy/intent-review.md) and
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
 
 CI builds the normal container once using persistent Docker-layer and Cargo
