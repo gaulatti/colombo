@@ -47,3 +47,4 @@ wiki
 ### Coverage ###
 jacoco.exec
 coverage/
+/coverage.json

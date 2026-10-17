@@ -2,31 +2,170 @@ name: Backend CI
 
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Metadata only: this event never executes contributor code.
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
+    inputs:
+      pull_request:
+        description: 'PR number to reassess; leave empty to run tests on this ref'
+        required: false
+        type: string
+      check_provider:
+        description: 'Only verify the DeepSeek key and structured output; never approve or merge'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: backend-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
-          components: rustfmt, clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Verify source
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v5
+          components: rustfmt, clippy
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          files: lcov.info
-          fail_ci_if_error: false
-          use_oidc: true
+          toolchain: nightly-2026-10-01
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Test approval policy
+        run: |
+          python3 -m unittest discover -s .github/ci -p 'test_*.py'
+          node --test .github/ci/*.test.cjs
+      - name: Rust format and lint
+        run: |
+          cargo +1.98.0 fmt --all -- --check
+          cargo +1.98.0 clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run all targets with branch instrumentation
+        id: coverage
+        run: >-
+          cargo +nightly-2026-10-01 llvm-cov
+          --locked --all-targets --all-features --branch
+          --no-cfg-coverage --no-cfg-coverage-nightly
+          --json --output-path coverage.json
+      - name: Run documentation tests
+        run: cargo +1.98.0 test --locked --doc --all-features
       - name: Verify container boundary
         run: ./tests/e2e.sh
+      - name: Enforce 100% line and branch coverage
+        run: python3 .github/ci/check_coverage.py coverage.json
+      - name: Retain coverage evidence
+        if: always() && steps.coverage.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage.json
+          if-no-files-found: error
+
+  assess-intent:
+    if: >-
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/approve-intent ')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && !inputs.check_provider)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      assessment: ${{ steps.assess.outputs.assessment }}
+    steps:
+      # Never load the controller from the PR or a manually selected branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        id: assess
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PR_NUMBER: ${{ inputs.pull_request }}
+        with:
+          script: |
+            const policy = require('./.github/ci/policy.cjs');
+            const assessment = await policy.assess({github, context});
+            core.setOutput('assessment', JSON.stringify(assessment));
+
+  approve-and-merge:
+    needs: assess-intent
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: write
+    concurrency:
+      group: pr-approval-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        env:
+          ASSESSMENT: ${{ needs.assess-intent.outputs.assessment }}
+          PR_NUMBER: ${{ inputs.pull_request }}
+        with:
+          script: |
+            const policy = require('./.github/ci/policy.cjs');
+            await policy.gate({github, context, core});
+
+  check-provider:
+    if: github.event_name == 'workflow_dispatch' && inputs.check_provider
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        with:
+          script: |
+            if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY is not configured');
+            const response = await fetch('https://api.deepseek.com/chat/completions', {
+              method: 'POST', signal: AbortSignal.timeout(90000),
+              headers: {Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json'},
+              body: JSON.stringify({model: 'deepseek-flash', thinking: {type: 'enabled'}, reasoning_effort: 'low', max_tokens: 4096,
+                response_format: {type: 'json_object'},
+                messages: [
+                  {role: 'system', content: 'You are a provider health check. Return valid JSON only, without tools or markdown.'},
+                  {role: 'user', content: 'Return exactly this JSON object: {"ok":true}'},
+                ]}),
+            });
+            if (!response.ok) throw new Error(`DeepSeek provider check failed: HTTP ${response.status}`);
+            const result = await response.json();
+            if (result.choices?.[0]?.finish_reason !== 'stop' ||
+                JSON.parse(result.choices[0].message.content).ok !== true) {
+              throw new Error('DeepSeek did not return the expected structured result');
+            }
+            core.info('DeepSeek Flash authentication and structured output verified. No PR was approved or merged.');
