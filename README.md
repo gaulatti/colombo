@@ -134,7 +134,7 @@ Each repository keeps its [review contract](.github/clouseau.md) and
 [configuration](.github/clouseau.json); shared review rules live in Clouseau.
 Private bastille access is unnecessary for contributors or CI.
 
-See the [shared review policy](https://github.com/gaulatti/clouseau/blob/f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1/policy/intent-review.md) and
+See the [shared review policy](https://github.com/gaulatti/clouseau/blob/07c4f7373fb723bbfc9b76cbe306809eac3f4413/policy/intent-review.md) and
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
 
 CI builds the normal container once using persistent Docker-layer and Cargo

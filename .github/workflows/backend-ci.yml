@@ -79,7 +79,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
-        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+        uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: test
       - name: Rust format and lint
@@ -97,7 +97,7 @@ jobs:
       - name: Run documentation tests
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
-        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+        uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: coverage
           coverage-report: coverage.json
@@ -134,7 +134,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         id: assess
         with:
           operation: assess
@@ -152,7 +152,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      checks: write
       actions: write
     concurrency:
       group: pr-approval-${{ github.event.pull_request.number }}
@@ -165,7 +164,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: gate
           native-gate: 'true'
@@ -185,7 +184,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: finalize
           assessment: ${{ needs.assess-intent.outputs.assessment }}
@@ -205,7 +204,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: request-reassessment
           pull-request: ${{ inputs.pull_request }}
@@ -216,12 +215,12 @@ jobs:
     timeout-minutes: 7
     permissions: {}
     steps:
-      - uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: check-provider
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Evaluate repository fit and test integrity with the live model
-        uses: gaulatti/clouseau@f1c5ff1872481feb7cf531cd1abf38f0fa65b7a1
+        uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: evaluate-review
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
