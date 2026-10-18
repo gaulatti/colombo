@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 const shared = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
 const {planWiki, validateBundle, validateConfig, evaluateWiki} = require(`${shared}/wiki.cjs`);
 const {publishWiki} = require(`${shared}/wiki-git.cjs`);
-const facts = (pages, source) => ({supported: true, findings: [], evidence: pages.map(page => ({page: page.path, source_path: Object.keys(source)[0], quote: Object.values(source)[0]}))});
+const facts = (pages, source) => ({supported: true, findings: [], evidence: pages.map(page => ({page: page.path, source_id: `${Object.keys(source)[0]}:L1`}))});
 const identity = {repository: 'example/upload-gateway', source_sha: 'a'.repeat(40), wiki_base_sha: 'b'.repeat(40), deployment_run_id: 123};
 const context = (event, ref, draft, deployed = 'success', planned = 'success') => ({
   github: {event_name: event, ref}, inputs: {validate_wiki_only: draft},
@@ -163,7 +163,7 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
   const page = {path: 'Home.md', content: '# Home\nNetwork failures are denial.'};
   for (const review of [
     {supported: false, findings: ['Network failures are Unavailable in production, not Denied.'], evidence: []},
-    {supported: true, findings: [], evidence: [{page: 'Home.md', source_path: 'src/cms.rs', quote: 'Err(ValidationError::Denied)'}]},
+    {supported: true, findings: [], evidence: [{page: 'Home.md', source_id: 'src/cms.rs:L99999'}]},
     {supported: true, findings: [], evidence: []},
   ]) {
     let calls = 0;
@@ -181,7 +181,7 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
     const body = JSON.parse(options.body); requests.push(body);
     const evidence = JSON.parse(body.messages[1].content);
     const supported = evidence.proposed_update[0].content.includes('Temporary upstream unavailability returns 502');
-    const verdict = supported ? facts(evidence.proposed_update, evidence.source) :
+    const verdict = supported ? {supported: true, findings: [], evidence: evidence.proposed_update.map(page => ({page: page.path, source_id: Object.keys(evidence.source_evidence)[0]}))} :
       {supported: false, findings: ['The production match maps Unavailable to 502.'], evidence: []};
     return {ok: true, json: async () => ({choices: [{finish_reason: 'stop', message: {content: JSON.stringify(verdict)}}]})};
   };
@@ -226,5 +226,28 @@ test('wiki correction never resubmits identical rejected text or continues after
     }}), unchanged ? /did not change/ : /did not support/);
     assert.equal(renders, 2);
     assert.equal(reviews, unchanged ? 1 : 2);
+  }
+});
+
+test('wiki citations resolve immutable source lines and refuse blanks, invented IDs and model quotations', async () => {
+  const source = {'README.md': '\n# Upload gateway\n'};
+  for (const evidence of [
+    {page: 'Home.md', source_id: 'README.md:L2'},
+    {page: 'Home.md', source_id: 'README.md:L1'},
+    {page: 'Home.md', source_id: 'README.md:L9999'},
+    {page: 'Home.md', source_id: 'README.md:L2', quote: 'invented quotation'},
+  ]) {
+    const diagnostics = [];
+    let calls = 0;
+    const result = planWiki({identity, source, wiki: {'Home.md': '# Home'}, diagnostic: value => diagnostics.push(value), complete: async ({messages}) => {
+      calls++;
+      const input = JSON.parse(messages[1].content);
+      return {content: JSON.stringify(input.proposed_update ? {supported: true, findings: [], evidence: [evidence]} :
+        input.requested_page ? {path: 'Home.md', content: '# Upload gateway'} : {pages: [{path: 'Home.md', reason: 'Gateway documentation'}]})};
+    }});
+    if (evidence.source_id === 'README.md:L2' && !Object.hasOwn(evidence, 'quote')) assert.equal((await result).updates[0].content, '# Upload gateway');
+    else await assert.rejects(result, /exact source evidence/);
+    assert.equal(calls, 3);
+    assert.deepEqual(diagnostics[0].source_evidence, {'README.md:L1': '', 'README.md:L2': '# Upload gateway', 'README.md:L3': ''});
   }
 });

@@ -158,8 +158,8 @@ DeepSeek prepares a coordinated update to the repository wiki. Clouseau reads th
 exact deployed source revision and current wiki, plans every affected page, then
 generates and validates the complete batch, including navigation and page links.
 A separate DeepSeek call fact-checks the full update against production source;
-it must support every updated page with an exact source quotation and no findings.
-Unsupported claims, invented quotations, or missing page evidence stop publication.
+it must support every updated page with a reference to an exact source line and no findings.
+Unsupported claims, invented source references, or missing page evidence stop publication.
 The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
 environment files are not documentation sources.
 
@@ -191,3 +191,9 @@ full review; a second rejection stops publication. Drafts and factual findings
 are retained in the workflow artifact for diagnosis, including failed runs.
 The validation-only false-claim diagnostic disables correction so rejection is
 verified directly.
+
+Factual citations select preassigned `path:Lnumber` references to exact source
+lines. The model cannot supply its own quotation text. Missing, invented, blank,
+or incomplete page references fail validation; the workflow diagnostic includes
+the source-line map for inspection. Every request keeps the complete evidence
+within its explicit context limit or fails without publication.
