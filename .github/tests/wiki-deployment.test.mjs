@@ -191,7 +191,7 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
   for (const body of requests) {
     assert.deepEqual(body.thinking, {type: 'disabled'});
     assert.equal(body.tools[0].function.strict, true);
-    assert.deepEqual(body.tools[0].function.parameters.required, ['supported', 'findings', 'evidence']);
+    assert.deepEqual(body.tools[0].function.parameters.required, ['evidence', 'findings', 'supported']);
     assert.deepEqual(body.tool_choice, {type: 'function', function: {name: 'wiki_result'}});
   }
 });
@@ -268,7 +268,7 @@ test('production wiki transport enforces separate native schemas for plan, reque
     const bundle = await planWiki({identity, source: {'README.md': 'The spool is persistent.'}, wiki: {'Home.md': '# Home'}});
     assert.match(bundle.updates[0].content, /spool is persistent/);
   } finally {globalThis.fetch = original;}
-  assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['supported', 'findings', 'evidence']]);
+  assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['evidence', 'findings', 'supported']]);
   assert.ok(requests.every(body => body.tools[0].function.strict === true && body.tools[0].function.parameters.additionalProperties === false));
   assert.deepEqual(requests[1].tools[0].function.parameters.properties.path.enum, ['Home.md']);
 });

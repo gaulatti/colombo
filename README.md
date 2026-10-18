@@ -80,8 +80,10 @@ Client-error statuses and valid JSON with missing/invalid required fields are
 `Denied`; transport failures, other unsuccessful statuses, and unreadable JSON
 are `Unavailable`. The HTTP upload endpoint currently maps both to `401`.
 Receipt lookup maps denial to `401` and CMS unavailability to `503`.
-Callback 5xx/network failures schedule bounded retries after delivery; they become
-terminal only when the callback attempt budget is exhausted.
+A callback 4xx is a terminal dependency denial: the receipt records
+`dependency_denied`, accepted bytes are quarantined, and an associated live FTP
+session is invalidated. Callback 5xx/network failures schedule bounded retries
+after delivery; they become terminal only when the callback budget is exhausted.
 
 ## FTPS
 
@@ -230,3 +232,7 @@ python3 .clouseau-ci/src/check_coverage.py coverage.json src
 
 Use the exact Clouseau revision checked out by `backend-ci.yml`; the same checkout
 is required by the workflow integration tests in `.github/tests`.
+
+Factual review emits source evidence and unresolved findings before the final
+supporting verdict. Supported claims belong in evidence; a false verdict, any
+unresolved findings, or invalid source references still blocks publication.
