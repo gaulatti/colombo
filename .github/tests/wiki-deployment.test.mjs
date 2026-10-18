@@ -215,17 +215,17 @@ test('a rejected wiki draft is corrected from findings and only changed, freshly
   assert.deepEqual(diagnostics.map(result => result.revision), [0, 1]);
 });
 
-test('wiki correction never resubmits identical rejected text or continues after a second rejection', async () => {
+test('wiki correction never resubmits rejected text or continues after its fixed revision budget', async () => {
   for (const unchanged of [true, false]) {
     let renders = 0, reviews = 0;
     await assert.rejects(planWiki({identity, source: {'README.md': 'Unavailable returns 502.'}, wiki: {'Home.md': '# Home'}, complete: async ({messages}) => {
       const input = JSON.parse(messages[1].content);
       if (input.proposed_update) {reviews++; return {content: JSON.stringify({supported: false, findings: ['Wrong status.'], evidence: []})};}
-      if (input.requested_page) {renders++; return {content: JSON.stringify({path: 'Home.md', content: '# Home\nWrong status.' + (!unchanged && renders === 2 ? ' Still wrong.' : '')})};}
+      if (input.requested_page) {renders++; return {content: JSON.stringify({path: 'Home.md', content: '# Home\nWrong status.' + (!unchanged ? ` Still wrong ${renders}.` : '')})};}
       return {content: JSON.stringify({pages: [{path: 'Home.md', reason: 'HTTP status'}]})};
     }}), unchanged ? /did not change/ : /did not support/);
-    assert.equal(renders, 2);
-    assert.equal(reviews, unchanged ? 1 : 2);
+    assert.equal(renders, unchanged ? 2 : 4);
+    assert.equal(reviews, unchanged ? 1 : 4);
   }
 });
 

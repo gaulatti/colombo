@@ -66,6 +66,23 @@ curl http://localhost:8080/uploads/OPERATION_ID \
 
 Receipt states are `accepted`, `uploading`, `delivered`, `callback-confirmed`, `failed`, and `expired`. Receipts include the assignment, protocol, byte count, SHA-256 checksum, timestamps, and bounded attempt/failure fields; they never include local paths, credentials, bucket names, object keys, or raw errors. Unknown or tenant/assignment-mismatched IDs return `404`, bad credentials return `401`, and retained expired receipts return `410`.
 
+## Credential refresh and authentication failures
+
+The durable upload worker handles both HTTP- and FTP-accepted operations. Expired
+S3 credentials can trigger CMS revalidation using the persisted validation key,
+followed by another S3 attempt within the five-attempt upload budget. Refresh
+unavailability is retryable. A denied refresh or changed assignment is terminal;
+only a terminal dependency denial invalidates an associated live FTP session.
+HTTP operations have no persistent FTP session to invalidate.
+
+CMS validation distinguishes denied credentials from upstream unavailability.
+Client-error statuses and valid JSON with missing/invalid required fields are
+`Denied`; transport failures, other unsuccessful statuses, and unreadable JSON
+are `Unavailable`. The HTTP upload endpoint currently maps both to `401`.
+Receipt lookup maps denial to `401` and CMS unavailability to `503`.
+Callback 5xx/network failures schedule bounded retries after delivery; they become
+terminal only when the callback attempt budget is exhausted.
+
 ## FTPS
 
 Plain FTP remains available. To additionally enable explicit FTPS on the same control port, mount a PEM certificate chain and private key read-only and set:
@@ -186,8 +203,8 @@ keeps its existing reasoning mode. The independent factual gate still applies to
 every proposed wiki update before publication.
 
 If factual review rejects a draft with actionable findings, the generator may
-produce one corrected batch. It must change the rejected text and pass a fresh
-full review; a second rejection stops publication. Drafts and factual findings
+produce up to three corrected batches. Each must change the rejected text and pass a fresh
+full review. Repeated drafts and an exhausted correction budget stop publication. Drafts and factual findings
 are retained in the workflow artifact for diagnosis, including failed runs.
 The validation-only false-claim diagnostic disables correction so rejection is
 verified directly.
