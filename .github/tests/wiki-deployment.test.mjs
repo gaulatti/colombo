@@ -61,6 +61,8 @@ test('deployment graph binds generation and atomic publication to the same exact
   assert.equal(upload.with.name, 'wiki-plan-${{ github.run_id }}-${{ github.sha }}');
   assert.equal(download.with.name, upload.with.name);
   assert.equal(upload.with['if-no-files-found'], 'error');
+  assert.equal(upload.if, 'always()', 'keep factual diagnostics even when the draft is rejected');
+  assert.equal(upload.with.path, 'work/wiki-plan.json*');
   assert.equal(download.with['run-id'], undefined, 'artifacts must come from this same workflow run');
   const pin = ci.jobs.verify.steps.find(step => step.with?.repository === 'gaulatti/clouseau').with.ref;
   for (const step of [...plan, ...publish].filter(step => step.uses?.startsWith('gaulatti/clouseau@'))) {
@@ -165,7 +167,7 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
     {supported: true, findings: [], evidence: []},
   ]) {
     let calls = 0;
-    await assert.rejects(planWiki({identity, source, wiki, complete: async () => ({content: JSON.stringify(++calls === 1 ?
+    await assert.rejects(planWiki({identity, source, wiki, allowCorrection: false, complete: async () => ({content: JSON.stringify(++calls === 1 ?
       {pages: [{path: page.path, reason: 'Authentication contract'}]} : calls === 2 ? page : review)})}));
     assert.equal(calls, 3, 'a substantive factual rejection is final, never retried until favorable');
   }
@@ -191,5 +193,38 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
     assert.equal(body.reasoning_effort, undefined);
     assert.deepEqual(body.response_format, {type: 'json_object'});
     assert.equal(body.tools, undefined);
+  }
+});
+
+test('a rejected wiki draft is corrected from findings and only changed, freshly supported text is returned', async () => {
+  const source = {'src/auth.rs': 'Failure::Unavailable => 502'};
+  const wiki = {'Home.md': '# Home'};
+  const requests = [], diagnostics = [];
+  const bundle = await planWiki({identity, source, wiki, diagnostic: result => diagnostics.push(result), complete: async ({messages}) => {
+    const input = JSON.parse(messages[1].content); requests.push(input);
+    if (input.proposed_update) return {content: JSON.stringify(input.proposed_update[0].content.includes('502') ? facts(input.proposed_update, source) :
+      {supported: false, findings: ['Unavailable maps to 502, not 401.'], evidence: []})};
+    if (input.requested_page) return {content: JSON.stringify({path: 'Home.md', content: '# Home\nUnavailable returns ' + (input.review_findings.length ? '502' : '401')})};
+    return {content: JSON.stringify({pages: [{path: 'Home.md', reason: 'HTTP status contract'}]})};
+  }});
+  assert.equal(requests.length, 5);
+  assert.deepEqual(requests[3].review_findings, ['Unavailable maps to 502, not 401.']);
+  assert.deepEqual(requests[3].previous_update, requests[2].proposed_update);
+  assert.notDeepEqual(requests[2].proposed_update, requests[4].proposed_update);
+  assert.equal(bundle.updates[0].content, '# Home\nUnavailable returns 502');
+  assert.deepEqual(diagnostics.map(result => result.revision), [0, 1]);
+});
+
+test('wiki correction never resubmits identical rejected text or continues after a second rejection', async () => {
+  for (const unchanged of [true, false]) {
+    let renders = 0, reviews = 0;
+    await assert.rejects(planWiki({identity, source: {'README.md': 'Unavailable returns 502.'}, wiki: {'Home.md': '# Home'}, complete: async ({messages}) => {
+      const input = JSON.parse(messages[1].content);
+      if (input.proposed_update) {reviews++; return {content: JSON.stringify({supported: false, findings: ['Wrong status.'], evidence: []})};}
+      if (input.requested_page) {renders++; return {content: JSON.stringify({path: 'Home.md', content: '# Home\nWrong status.' + (!unchanged && renders === 2 ? ' Still wrong.' : '')})};}
+      return {content: JSON.stringify({pages: [{path: 'Home.md', reason: 'HTTP status'}]})};
+    }}), unchanged ? /did not change/ : /did not support/);
+    assert.equal(renders, 2);
+    assert.equal(reviews, unchanged ? 1 : 2);
   }
 });

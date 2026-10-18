@@ -184,3 +184,10 @@ Wiki calls use DeepSeek Flash in non-thinking JSON mode so their bounded respons
 budget is available for the documentation and source citations. PR assessment
 keeps its existing reasoning mode. The independent factual gate still applies to
 every proposed wiki update before publication.
+
+If factual review rejects a draft with actionable findings, the generator may
+produce one corrected batch. It must change the rejected text and pass a fresh
+full review; a second rejection stops publication. Drafts and factual findings
+are retained in the workflow artifact for diagnosis, including failed runs.
+The validation-only false-claim diagnostic disables correction so rejection is
+verified directly.

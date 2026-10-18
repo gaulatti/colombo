@@ -201,20 +201,21 @@ jobs:
           persist-credentials: false
       - name: Verify the live wiki factual gate
         if: inputs.validate_wiki_only
-        uses: gaulatti/clouseau@253cc1a772cff080e4a5fe1f82c2d8926b4b52d2
+        uses: gaulatti/clouseau@37fcca5f8b877151ebff7d47d1a7f396fa2cd4f0
         with:
           operation: evaluate-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Generate and validate the complete wiki update
-        uses: gaulatti/clouseau@253cc1a772cff080e4a5fe1f82c2d8926b4b52d2
+        uses: gaulatti/clouseau@37fcca5f8b877151ebff7d47d1a7f396fa2cd4f0
         with:
           operation: plan-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
           wiki-draft: ${{ inputs.validate_wiki_only && 'true' || 'false' }}
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
-          path: work/wiki-plan.json
+          path: work/wiki-plan.json*
           if-no-files-found: error
           retention-days: 7
 
@@ -244,7 +245,7 @@ jobs:
           name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
           path: wiki-plan
       - name: Publish all wiki pages atomically
-        uses: gaulatti/clouseau@253cc1a772cff080e4a5fe1f82c2d8926b4b52d2
+        uses: gaulatti/clouseau@37fcca5f8b877151ebff7d47d1a7f396fa2cd4f0
         with:
           operation: publish-wiki
           wiki-plan-path: wiki-plan/wiki-plan.json
