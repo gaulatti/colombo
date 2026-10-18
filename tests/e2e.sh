@@ -162,7 +162,7 @@ for key_mode in exact-key oversized-key; do
   fi
 done
 state="$(mock_state)"
-STATE_JSON="$state" python3 -c 'import json,os; from urllib.parse import unquote; value=json.loads(os.environ["STATE_JSON"]); lengths=[len(unquote(path).split("/",2)[2].encode("utf-8")) for path in value["s3_requests"]]; assert 1024 in lengths; assert all(length <= 1024 for length in lengths); assert any(item["target_filename"] == "exact.jpg" for item in value["callbacks"])'
+STATE_JSON="$state" python3 -c 'import json,os; from urllib.parse import unquote,urlsplit; value=json.loads(os.environ["STATE_JSON"]); lengths=[len(unquote(urlsplit(path).path).split("/",2)[2].encode("utf-8")) for path in value["s3_requests"]]; assert 1024 in lengths; assert all(length <= 1024 for length in lengths); assert any(item["target_filename"] == "exact.jpg" for item in value["callbacks"])'
 
 printf 'http-after-restart' > "$cert_dir/http-after-restart.txt"
 curl -fsS -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' \

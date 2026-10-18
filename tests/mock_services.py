@@ -1,7 +1,7 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 STATE = {
     "callback_attempts": [],
@@ -104,7 +104,7 @@ class Handler(BaseHTTPRequestHandler):
         self._body()
         with STATE_CHANGED:
             STATE["s3_requests"].append(self.path)
-            key = unquote(self.path).split("/", 2)[2]
+            key = unquote(urlsplit(self.path).path).split("/", 2)[2]
             if len(key.encode("utf-8")) > 1024:
                 error = b"<Error><Code>KeyTooLongError</Code></Error>"
                 self.send_response(400)
