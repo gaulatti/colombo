@@ -159,10 +159,10 @@ criteria. The repair job requires a matching head repository before loading its
 author credential, and the writer independently rejects forks.
 
 Each repository keeps its [review contract](.github/clouseau.md) and
-[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/b697078e18f39375ac530f9a67a9ca43071451f6/policy/change-acceptance.md)
+[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/bbb171365423e38998395719ef4e7b21745085b4/policy/change-acceptance.md)
 live in Clouseau. Private bastille access is unnecessary. Production currently
 uses DeepSeek atomic grading; the read-only `check_provider` diagnostic compares
-it with Jev plus explicit DeepSeek escalation on five fixed executed fixtures,
+it with Jev plus explicit DeepSeek escalation on six fixed executed fixtures,
 retaining decisions, usage, and whole-review cost. This qualification is separate
 from a real PR merge. Provider truncation retries at most three times with
 identical evidence and 8,192/16,384/32,768 output-token limits; completed negative
