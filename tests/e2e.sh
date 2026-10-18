@@ -138,6 +138,32 @@ python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["state"] =
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' "http://127.0.0.1:18081/uploads/$operation_id")" = 401
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: other-assignment' "http://127.0.0.1:18081/uploads/$operation_id")" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' "http://127.0.0.1:18081/uploads/00000000-0000-4000-8000-000000000000")" = 404
+# Exercise the byte limit through real HTTP acceptance, background SDK delivery,
+# durable receipts, and the normal deployable container.
+printf 'key-limit-body' > "$cert_dir/s3-key.jpg"
+for key_mode in exact-key oversized-key; do
+  test "$(curl -sS -o "$cert_dir/key-acceptance.json" -w '%{http_code}' -X POST \
+    -H 'X-Colombo-Username: photographer' -H "X-Colombo-Password: $key_mode" \
+    -F "file=@$cert_dir/s3-key.jpg;filename=exact.jpg" http://127.0.0.1:18081/upload)" = 202
+  key_operation="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["operation_id"])' < "$cert_dir/key-acceptance.json")"
+  expected_state=callback-confirmed
+  if [ "$key_mode" = oversized-key ]; then expected_state=failed; fi
+  for _ in $(seq 1 80); do
+    key_receipt="$(curl -fsS -H 'X-Colombo-Username: photographer' -H "X-Colombo-Password: $key_mode" "http://127.0.0.1:18081/uploads/$key_operation")"
+    if EXPECTED_STATE="$expected_state" python3 -c 'import json,os,sys; raise SystemExit(0 if json.load(sys.stdin)["state"] == os.environ["EXPECTED_STATE"] else 1)' <<<"$key_receipt"; then
+      break
+    fi
+    sleep 0.25
+  done
+  EXPECTED_STATE="$expected_state" python3 -c 'import json,os,sys; value=json.load(sys.stdin); assert value["state"] == os.environ["EXPECTED_STATE"]; assert value["upload_attempts"] == 1; assert value["callback_attempts"] == (0 if value["state"] == "failed" else 1); assert value.get("failure_code") == ("invalid_metadata" if value["state"] == "failed" else None)' <<<"$key_receipt"
+  if [ "$key_mode" = oversized-key ]; then
+    docker compose -f "$repo_dir/compose.yaml" exec -T -e OPERATION_ID="$key_operation" colombo sh -c \
+      'test "$(cat "/var/lib/colombo/spool/quarantine/$OPERATION_ID.content")" = key-limit-body && test ! -f "/var/lib/colombo/spool/operations/$OPERATION_ID/content"'
+  fi
+done
+state="$(mock_state)"
+STATE_JSON="$state" python3 -c 'import json,os; from urllib.parse import unquote; value=json.loads(os.environ["STATE_JSON"]); lengths=[len(unquote(path).split("/",2)[2].encode("utf-8")) for path in value["s3_requests"]]; assert 1024 in lengths; assert all(length <= 1024 for length in lengths); assert any(item["target_filename"] == "exact.jpg" for item in value["callbacks"])'
+
 printf 'http-after-restart' > "$cert_dir/http-after-restart.txt"
 curl -fsS -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' \
   -F file=@"$cert_dir/http-after-restart.txt" http://127.0.0.1:18081/upload >/dev/null

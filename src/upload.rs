@@ -33,6 +33,7 @@ use crate::{
 const WORKER_COUNT: usize = 8;
 const WORK_QUEUE_CAPACITY: usize = 256;
 const SPOOL_SCAN_INTERVAL: StdDuration = StdDuration::from_secs(60);
+const MAX_S3_KEY_BYTES: usize = 1024;
 
 #[derive(Debug)]
 pub struct SessionHandle {
@@ -496,6 +497,14 @@ impl UploadService {
             self.spool
                 .save_record(record)
                 .map_err(StageFailure::Transient)?;
+        }
+
+        if record
+            .object_key
+            .as_deref()
+            .is_some_and(|key| key.len() > MAX_S3_KEY_BYTES)
+        {
+            return Err(StageFailure::Invalid);
         }
 
         let mut result = self.put_attempt(record, session).await;
@@ -1412,6 +1421,212 @@ mod tests {
                 .as_deref(),
             Some("assignment-123/slash.jpg")
         );
+    }
+
+    #[tokio::test]
+    async fn s3_key_byte_limits_preserve_exact_boundary_and_terminal_receipts() {
+        use crate::test_support;
+        let endpoint = match std::env::var("COLOMBO_S3_FIXTURE_ENDPOINT") {
+            Ok(url) => url,
+            Err(_) => {
+                let mock = test_support::Mock::new(vec![(200, String::new())]).await;
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", "upload::tests::s3_key_byte_limits_preserve_exact_boundary_and_terminal_receipts", "--nocapture"])
+                    .env("COLOMBO_S3_FIXTURE_ENDPOINT", &mock.url)
+                    .env("AWS_ENDPOINT_URL_S3", &mock.url)
+                    .env("AWS_EC2_METADATA_DISABLED", "true")
+                    .env("AWS_MAX_ATTEMPTS", "1");
+                let status = tokio::task::spawn_blocking(move || command.status().unwrap())
+                    .await
+                    .unwrap();
+                assert!(status.success());
+                // Three valid cases each make one real SDK request and one CMS
+                // callback. Every oversized or incomplete key makes neither.
+                let requests = mock.requests();
+                assert_eq!(requests.len(), 6);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|request| request.uri == "/photo")
+                        .count(),
+                    3
+                );
+                for request in requests.iter().filter(|request| request.uri != "/photo") {
+                    assert_eq!(request.headers["x-amz-decoded-content-length"], "13");
+                    assert!(
+                        request
+                            .body
+                            .windows(13)
+                            .any(|bytes| bytes == b"durable media")
+                    );
+                }
+                return;
+            }
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("spool");
+        let spool = Arc::new(Spool::open(root.clone()).unwrap());
+        let source = temp.path().join("source.jpg");
+        std::fs::write(&source, b"durable media").unwrap();
+        let pool = test_support::database().await;
+        let session = test_support::session(&endpoint);
+        test_support::seed(&pool, &session).await;
+        let unicode_name = format!("{}.jpg", "a".repeat(19));
+        for (prefix, filename, bytes, restored, protocol) in [
+            (
+                "p".repeat(1014),
+                "exact.jpg".to_owned(),
+                1024,
+                false,
+                SourceProtocol::Http,
+            ),
+            (
+                format!("{}/", "p".repeat(1014)),
+                "exact.jpg".to_owned(),
+                1024,
+                false,
+                SourceProtocol::Ftp,
+            ),
+            (
+                "é".repeat(500),
+                unicode_name.clone(),
+                1024,
+                false,
+                SourceProtocol::Http,
+            ),
+            (
+                "p".repeat(1015),
+                "exact.jpg".to_owned(),
+                1025,
+                false,
+                SourceProtocol::Http,
+            ),
+            (
+                format!("{}/", "p".repeat(1015)),
+                "exact.jpg".to_owned(),
+                1025,
+                false,
+                SourceProtocol::Ftp,
+            ),
+            (
+                format!("{}a", "é".repeat(500)),
+                unicode_name,
+                1025,
+                false,
+                SourceProtocol::Http,
+            ),
+            (
+                "p".repeat(1015),
+                "exact.jpg".to_owned(),
+                1025,
+                true,
+                SourceProtocol::Ftp,
+            ),
+        ] {
+            let invalid = bytes > 1024;
+            let mut current = session.clone();
+            current.upload.as_mut().unwrap().key_prefix = prefix.clone();
+            let mut record = spool
+                .accept(&current, protocol, &filename, &source)
+                .unwrap();
+            assert_eq!(record.state, UploadState::Accepted);
+            if restored {
+                record.state = UploadState::Uploading;
+                record.target_filename = Some(filename.clone());
+                record.object_bucket = Some("uploads".into());
+                record.object_key = Some(format!("{prefix}/{filename}"));
+                spool.save_record(&record).unwrap();
+                let mut private = spool.load_private(record.operation_id).unwrap();
+                private.upload.key_prefix = "changed-credentials-prefix".into();
+                spool.save_private(record.operation_id, &private).unwrap();
+            }
+            let replies = if invalid {
+                vec![(
+                    400,
+                    "<Error><Code>KeyTooLongError</Code><Message>fixture</Message></Error>"
+                        .to_owned(),
+                )]
+            } else {
+                vec![(200, String::new())]
+            };
+            assert!(
+                reqwest::Client::new()
+                    .post(format!("{endpoint}/__control"))
+                    .json(&replies)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+            let mut service = test_service(Arc::new(Spool::open(root.clone()).unwrap()));
+            service.pool = pool.clone();
+            service.process(record.operation_id).await.unwrap();
+            let complete = spool.load_record(record.operation_id).unwrap();
+            assert_eq!(complete.object_key.as_ref().unwrap().len(), bytes);
+            assert_eq!(complete.upload_attempts, 1);
+            let receipt = service
+                .receipt_for_assignment(
+                    record.operation_id,
+                    current.tenant.id,
+                    current.assignment_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let metrics = String::from_utf8(service.metrics.encode().unwrap()).unwrap();
+            if invalid {
+                assert_eq!(receipt.state, UploadState::Failed);
+                assert_eq!(receipt.failure_code, Some(FailureCode::InvalidMetadata));
+                assert_eq!(receipt.callback_attempts, 0);
+                assert!(receipt.expires_at.is_some());
+                assert_eq!(
+                    std::fs::read(
+                        root.join("quarantine")
+                            .join(format!("{}.content", record.operation_id))
+                    )
+                    .unwrap(),
+                    b"durable media"
+                );
+                assert!(spool.load_private(record.operation_id).is_err());
+                assert!(!spool.content_path(record.operation_id).exists());
+                assert!(metrics.contains(&format!(
+                    "colombo_upload_spool_outcomes_total{{outcome=\"invalid_metadata\",source=\"{}\"}} 1",
+                    protocol.as_str()
+                )));
+                assert!(!metrics.contains("dependency=\"s3\""));
+                assert!(!metrics.contains("operation=\"s3_put\""));
+                service.process(record.operation_id).await.unwrap();
+                assert_eq!(
+                    spool
+                        .load_record(record.operation_id)
+                        .unwrap()
+                        .upload_attempts,
+                    1
+                );
+            } else {
+                assert_eq!(receipt.state, UploadState::CallbackConfirmed);
+                assert_eq!(receipt.callback_attempts, 1);
+                assert_eq!(receipt.failure_code, None);
+                assert!(metrics.contains("dependency=\"s3\""));
+            }
+        }
+        // Preserve existing handling of incomplete persisted metadata. It must
+        // fail before networking rather than being rebuilt from fresh credentials.
+        let mut missing = spool
+            .accept(&session, SourceProtocol::Http, "missing.jpg", &source)
+            .unwrap();
+        missing.target_filename = Some("missing.jpg".into());
+        missing.object_bucket = Some("uploads".into());
+        spool.save_record(&missing).unwrap();
+        let mut service = test_service(spool.clone());
+        service.pool = pool;
+        service.process(missing.operation_id).await.unwrap();
+        let pending = spool.load_record(missing.operation_id).unwrap();
+        assert_eq!(pending.state, UploadState::Accepted);
+        assert_eq!(pending.upload_attempts, 1);
+        assert!(pending.next_attempt_at > Utc::now());
     }
 
     fn session() -> SessionData {

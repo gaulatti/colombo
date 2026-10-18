@@ -1,6 +1,7 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 STATE = {
     "callback_attempts": [],
@@ -49,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/validate":
             if self.headers.get("X-Colombo-API-Key") != "tenant-api-key" or body.get(
                 "key"
-            ) not in ("secret", "naming", "other-assignment"):
+            ) not in ("secret", "naming", "other-assignment", "exact-key", "oversized-key"):
                 return self._json(401, {})
             upload = {
                 "accessKeyId": "test-access",
@@ -60,6 +61,8 @@ class Handler(BaseHTTPRequestHandler):
                 "keyPrefix": "assignment-123",
                 "expiresAt": "2099-01-01T00:00:00Z",
             }
+            if body["key"] in ("exact-key", "oversized-key"):
+                upload["keyPrefix"] = "p" * (1014 if body["key"] == "exact-key" else 1015)
             if body["key"] == "naming":
                 upload.update({
                     "sequenceEndpoint": "/sequence",
@@ -101,6 +104,14 @@ class Handler(BaseHTTPRequestHandler):
         self._body()
         with STATE_CHANGED:
             STATE["s3_requests"].append(self.path)
+            key = unquote(self.path).split("/", 2)[2]
+            if len(key.encode("utf-8")) > 1024:
+                error = b"<Error><Code>KeyTooLongError</Code></Error>"
+                self.send_response(400)
+                self.send_header("Content-Length", str(len(error)))
+                self.end_headers()
+                self.wfile.write(error)
+                return
             while STATE["hold_s3"]:
                 STATE_CHANGED.wait()
             if STATE["s3_failures"] > 0:

@@ -66,6 +66,14 @@ curl http://localhost:8080/uploads/OPERATION_ID \
 
 Receipt states are `accepted`, `uploading`, `delivered`, `callback-confirmed`, `failed`, and `expired`. Receipts include the assignment, protocol, byte count, SHA-256 checksum, timestamps, and bounded attempt/failure fields; they never include local paths, credentials, bucket names, object keys, or raw errors. Unknown or tenant/assignment-mismatched IDs return `404`, bad credentials return `401`, and retained expired receipts return `410`.
 
+The complete S3 object key (CMS prefix, joining slash, and resolved filename)
+must fit [S3's 1,024 UTF-8 byte limit](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html).
+An exact-limit key is valid. Oversized keys, including keys recovered from the
+spool, become terminal `failed` receipts with `invalid_metadata` before any S3
+request or CMS callback. The accepted bytes are quarantined under the existing
+failed-operation retention policy. The bounded `invalid_metadata` spool outcome
+records this rejection; it does not schedule S3 retries or invalidate credentials.
+
 ## Credential refresh and authentication failures
 
 The durable upload worker handles both HTTP- and FTP-accepted operations. Expired
