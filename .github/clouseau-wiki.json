@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "source_paths": [
+    "README.md",
+    "src/",
+    "migrations/",
+    "Dockerfile",
+    "compose.yaml",
+    "Makefile",
+    "scripts/",
+    ".env.example",
+    ".github/workflows/"
+  ],
+  "deployment_workflow": "backend-deploy.yml",
+  "deployment_job": "deploy",
+  "wiki_branch": "master"
+}

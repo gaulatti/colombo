@@ -149,3 +149,28 @@ image without rebuilding it. Intent comments reuse the existing verification.
 ## Java versus Rust benchmark
 
 Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 255 ms versus 9.94 s to become healthy, 1.281 MiB versus 235.6 MiB idle memory, 18.41x the HTTP root throughput, and 4.23x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.
+
+
+## Wiki maintenance after deployment
+
+After the existing `Backend Deploy` workflow's `deploy` job succeeds on `main`,
+DeepSeek prepares a coordinated update to the repository wiki. Clouseau reads the
+exact deployed source revision and current wiki, plans every affected page, then
+generates and validates the complete batch, including navigation and page links.
+The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
+environment files are not documentation sources.
+
+A separate job, without the provider key or deployment credentials, independently
+checks the deployment result and publishes one atomic wiki commit. Human edits
+made during generation stop publication rather than being overwritten. The wiki
+receipt records the source SHA and deployment run; rerunning an already documented
+revision does not create another commit. Deployment and documentation are serialized.
+A documentation failure leaves the completed deployment intact and makes the
+workflow visibly fail; it does not roll back or claim external service health.
+
+For a safe preflight, manually run `Backend Deploy` with `validate_wiki_only: true`.
+It generates a real DeepSeek draft artifact and checks wiki Git write access with
+`git push --dry-run`; it skips image builds, deployment, and wiki publication.
+Normal post-deployment runs use the built-in GitHub token for wiki publication and
+`DEEPSEEK_API_KEY` only in the read-only generation job. No additional wiki secret
+is required when the repository token has wiki write access.
