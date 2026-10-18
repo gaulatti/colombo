@@ -106,7 +106,11 @@ test('pinned production planner coordinates multi-page navigation and preserves 
       if (evidence.proposed_update) return {content: JSON.stringify(facts(evidence.proposed_update, source))};
       return {content: JSON.stringify(requests.length === 1 ? {pages: pages.map(page => ({path: page.path, reason: 'Deployment evidence'}))} : pages[requests.length - 2])};
     }});
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 7);
+  for (const review of requests.filter(input => input.proposed_update)) {
+    assert.equal(review.proposed_update.length, 1);
+    assert.equal(review.other_proposed_pages.length, 2);
+  }
   assert.deepEqual(requests[3].proposed_pages, pages.slice(0, 2));
   assert.deepEqual(bundle.updates, pages);
   assert.match(bundle.updates[0].content, /Human introduction/);
