@@ -13,6 +13,7 @@ const require = createRequire(import.meta.url);
 const shared = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
 const {planWiki, validateBundle, validateConfig} = require(`${shared}/wiki.cjs`);
 const {publishWiki} = require(`${shared}/wiki-git.cjs`);
+const facts = (pages, source) => ({supported: true, findings: [], evidence: pages.map(page => ({page: page.path, source_path: Object.keys(source)[0], quote: Object.values(source)[0]}))});
 const identity = {repository: 'example/upload-gateway', source_sha: 'a'.repeat(40), wiki_base_sha: 'b'.repeat(40), deployment_run_id: 123};
 const context = (event, ref, draft, deployed = 'success', planned = 'success') => ({
   github: {event_name: event, ref}, inputs: {validate_wiki_only: draft},
@@ -91,12 +92,14 @@ test('pinned production planner coordinates multi-page navigation and preserves 
     {path: 'Wiki-Maintenance.md', content: '# Wiki maintenance\nPublish only after deployment.\n[Deployment](Deployment)'},
   ];
   const requests = [];
-  const bundle = await planWiki({identity, source: {'README.md': 'Spool is persistent. Update wiki after deployment.'}, wiki,
+  const source = {'README.md': 'Spool is persistent. Update wiki after deployment.'};
+  const bundle = await planWiki({identity, source, wiki,
     complete: async ({messages}) => {
       const evidence = JSON.parse(messages[1].content); requests.push(evidence);
+      if (evidence.proposed_update) return {content: JSON.stringify(facts(evidence.proposed_update, source))};
       return {content: JSON.stringify(requests.length === 1 ? {pages: pages.map(page => ({path: page.path, reason: 'Deployment evidence'}))} : pages[requests.length - 2])};
     }});
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 5);
   assert.deepEqual(requests[3].proposed_pages, pages.slice(0, 2));
   assert.deepEqual(bundle.updates, pages);
   assert.match(bundle.updates[0].content, /Human introduction/);
@@ -132,15 +135,34 @@ test('wiki-only format recovery keeps evidence identical and rejects an exhauste
   const wiki = {'Home.md': '# Home'};
   const page = {path: 'Home.md', content: '# Home\nPreserved introduction.'};
   const requests = [];
-  const result = await planWiki({identity, source: {}, wiki, complete: async ({messages}) => {
+  const source = {'README.md': 'Upload gateway deployment.'};
+  const result = await planWiki({identity, source, wiki, complete: async ({messages}) => {
     requests.push(messages);
+    if (JSON.parse(messages[1].content).proposed_update) return {content: JSON.stringify(facts([page], source))};
     return {content: requests.length === 1 ? JSON.stringify({pages: [{path: 'Home.md', reason: 'Deployment'}]}) :
       requests.length === 2 ? JSON.stringify(page) + '\n' + JSON.stringify(page) : JSON.stringify(page)};
   }});
   assert.deepEqual(result.updates, [page]);
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 4);
   assert.deepEqual(requests[1][1], requests[2][1]);
   let calls = 0;
   await assert.rejects(planWiki({identity, source: {}, wiki, complete: async () => {calls++; return {content: '{malformed'};}}), /invalid JSON twice/);
   assert.equal(calls, 2);
+});
+
+
+test('factual gate blocks the live-preflight error: temporary CMS failure is not denied credentials', async () => {
+  const source = {'src/cms.rs': 'Err(ValidationError::Unavailable(error.into()))'};
+  const wiki = {'Home.md': '# Home'};
+  const page = {path: 'Home.md', content: '# Home\nNetwork failures are denial.'};
+  for (const review of [
+    {supported: false, findings: ['Network failures are Unavailable in production, not Denied.'], evidence: []},
+    {supported: true, findings: [], evidence: [{page: 'Home.md', source_path: 'src/cms.rs', quote: 'Err(ValidationError::Denied)'}]},
+    {supported: true, findings: [], evidence: []},
+  ]) {
+    let calls = 0;
+    await assert.rejects(planWiki({identity, source, wiki, complete: async () => ({content: JSON.stringify(++calls === 1 ?
+      {pages: [{path: page.path, reason: 'Authentication contract'}]} : calls === 2 ? page : review)})}));
+    assert.equal(calls, 3, 'a substantive factual rejection is final, never retried until favorable');
+  }
 });

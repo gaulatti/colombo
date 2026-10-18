@@ -157,6 +157,9 @@ After the existing `Backend Deploy` workflow's `deploy` job succeeds on `main`,
 DeepSeek prepares a coordinated update to the repository wiki. Clouseau reads the
 exact deployed source revision and current wiki, plans every affected page, then
 generates and validates the complete batch, including navigation and page links.
+A separate DeepSeek call fact-checks the full update against production source;
+it must support every updated page with an exact source quotation and no findings.
+Unsupported claims, invented quotations, or missing page evidence stop publication.
 The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
 environment files are not documentation sources.
 
