@@ -89,7 +89,7 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
         if: *verify-code
-        uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: test
       - name: Check out pinned reviewer for consumer integration tests
@@ -97,7 +97,7 @@ jobs:
         if: *verify-code
         with:
           repository: gaulatti/clouseau
-          ref: 88f43e670374db073c4d5e2e93029f99ba8af563
+          ref: 5d21901ec28d82661500be3377a03ebe71cde0ff
           path: .clouseau-ci
           persist-credentials: false
       - name: Test workflow routing
@@ -124,7 +124,7 @@ jobs:
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
         if: *verify-code
-        uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: coverage
           coverage-report: coverage.json
@@ -166,7 +166,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+      - uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         id: assess
         with:
           operation: assess
@@ -201,7 +201,7 @@ jobs:
           ref: main
           persist-credentials: false
       - if: *approve-code
-        uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: gate
           native-gate: 'true'
@@ -221,7 +221,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+      - uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: finalize
           assessment: ${{ needs.assess-intent.outputs.assessment }}
@@ -241,7 +241,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+      - uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: request-reassessment
           pull-request: ${{ inputs.pull_request }}
@@ -252,12 +252,12 @@ jobs:
     timeout-minutes: 7
     permissions: {}
     steps:
-      - uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+      - uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: check-provider
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Evaluate repository fit and test integrity with the live model
-        uses: gaulatti/clouseau@88f43e670374db073c4d5e2e93029f99ba8af563
+        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
         with:
           operation: evaluate-review
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
