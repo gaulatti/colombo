@@ -66,6 +66,25 @@ curl http://localhost:8080/uploads/OPERATION_ID \
 
 Receipt states are `accepted`, `uploading`, `delivered`, `callback-confirmed`, `failed`, and `expired`. Receipts include the assignment, protocol, byte count, SHA-256 checksum, timestamps, and bounded attempt/failure fields; they never include local paths, credentials, bucket names, object keys, or raw errors. Unknown or tenant/assignment-mismatched IDs return `404`, bad credentials return `401`, and retained expired receipts return `410`.
 
+## Credential refresh and authentication failures
+
+The durable upload worker handles both HTTP- and FTP-accepted operations. Expired
+S3 credentials can trigger CMS revalidation using the persisted validation key,
+followed by another S3 attempt within the five-attempt upload budget. Refresh
+unavailability is retryable. A denied refresh or changed assignment is terminal;
+only a terminal dependency denial invalidates an associated live FTP session.
+HTTP operations have no persistent FTP session to invalidate.
+
+CMS validation distinguishes denied credentials from upstream unavailability.
+Client-error statuses and valid JSON with missing/invalid required fields are
+`Denied`; transport failures, other unsuccessful statuses, and unreadable JSON
+are `Unavailable`. The HTTP upload endpoint currently maps both to `401`.
+Receipt lookup maps denial to `401` and CMS unavailability to `503`.
+A callback 4xx is a terminal dependency denial: the receipt records
+`dependency_denied`, accepted bytes are quarantined, and an associated live FTP
+session is invalidated. Callback 5xx/network failures schedule bounded retries
+after delivery; they become terminal only when the callback budget is exhausted.
+
 ## FTPS
 
 Plain FTP remains available. To additionally enable explicit FTPS on the same control port, mount a PEM certificate chain and private key read-only and set:
@@ -149,3 +168,84 @@ image without rebuilding it. Intent comments reuse the existing verification.
 ## Java versus Rust benchmark
 
 Under identical Docker limits (one CPU, 512 MiB), the three-run medians were an 18.5 MB Rust image versus 148.5 MB for Java, 255 ms versus 9.94 s to become healthy, 1.281 MiB versus 235.6 MiB idle memory, 18.41x the HTTP root throughput, and 4.23x the FTP connection churn. See [the benchmark method and complete results](benchmarks/RESULTS.md); these listener measurements intentionally exclude CMS and S3 latency.
+
+
+## Wiki maintenance after deployment
+
+After the existing `Backend Deploy` workflow's `deploy` job succeeds on `main`,
+DeepSeek prepares a coordinated update to the repository wiki. Clouseau reads the
+exact deployed source revision and current wiki, plans every affected page, then
+generates and validates the complete batch, including navigation and page links.
+Flash plans and writes the pages. Each page gets an independent DeepSeek V4 Pro
+audit against production source, with the other proposed pages available for
+consistency;
+it must support every updated page with a reference to an exact source line and no findings.
+Unsupported claims, invented source references, or missing page evidence stop publication.
+The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
+environment files are not documentation sources.
+
+A separate job, without the provider key or deployment credentials, independently
+checks the deployment result and publishes one atomic wiki commit. Human edits
+made during generation stop publication rather than being overwritten. The wiki
+receipt records the source SHA and deployment run; rerunning an already documented
+revision does not create another commit. Deployment and documentation are serialized.
+A documentation failure leaves the completed deployment intact and makes the
+workflow visibly fail; it does not roll back or claim external service health.
+
+For a safe preflight, manually run `Backend Deploy` with `validate_wiki_only: true`.
+It verifies the live factual gate against supported and deliberately false
+authentication and protocol-refresh claims, generates a real DeepSeek draft
+artifact, and checks wiki
+Git write access with
+`git push --dry-run`; it skips image builds, deployment, and wiki publication.
+Normal post-deployment runs use the built-in GitHub token for wiki publication and
+`DEEPSEEK_API_KEY` only in the read-only generation job. No additional wiki secret
+is required when the repository token has wiki write access.
+
+Wiki planning and writing use DeepSeek Flash without reasoning. The independent
+V4 Pro factual checker uses low reasoning effort to trace shared production paths
+and challenge retained claims. PR assessment keeps its existing reasoning mode.
+Every proposed page must pass factual review before publication.
+
+If factual review rejects a draft with actionable findings, the generator may
+produce up to three corrected batches. Each must change the rejected text and pass a fresh
+full review. Repeated drafts and an exhausted correction budget stop publication. Drafts and factual findings
+are retained in the workflow artifact for diagnosis, including failed runs.
+The validation-only false-claim diagnostic disables correction so rejection is
+verified directly.
+
+Factual citations select preassigned `path:Lnumber` references to exact source
+lines. The model cannot supply its own quotation text. Missing, invented, blank,
+or incomplete page references fail validation; the workflow diagnostic includes
+the source-line map for inspection. Every request keeps the complete evidence
+within its explicit context limit or fails without publication.
+
+Planning, page generation, and factual review each have a native response schema
+using DeepSeek's beta strict return format, in addition to all local checks. No model-selected function is executed. PR review stays on
+its existing API and reasoning policy. This keeps response shape enforcement
+separate from the substantive correctness and publication decisions.
+
+The application coverage checker comes from the CI-pinned Clouseau checkout at
+`.clouseau-ci`. After producing the instrumented `coverage.json` report, the
+local equivalent of the enforcement step is:
+
+```sh
+python3 .clouseau-ci/src/check_coverage.py coverage.json src
+```
+
+Use the exact Clouseau revision checked out by `backend-ci.yml`; the same checkout
+is required by the workflow integration tests in `.github/tests`.
+
+Factual review emits source evidence and unresolved findings before the final
+supporting verdict. Supported claims belong in evidence; a false verdict, any
+unresolved findings, or invalid source references still blocks publication.
+
+The factual report is a fixed checklist for the planned pages: one exact source
+reference, bounded unresolved findings, and a verdict for each page. Every page
+must pass, with no contradictions between its findings and verdict. Correction
+regenerates only flagged pages and preserves the other page bytes exactly.
+
+Planning and writing use DeepSeek Flash. The independent factual reviewer uses
+DeepSeek V4 Pro with the same configured provider key; no new secret is required.
+The live diagnostic exercises the actual factual reviewer on both correct and
+deliberately false documentation before validation-only draft generation.

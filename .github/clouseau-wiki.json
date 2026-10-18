@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "source_paths": [
+    "README.md",
+    "src/",
+    "migrations/",
+    "Dockerfile",
+    "compose.yaml",
+    "Makefile",
+    "scripts/",
+    ".env.example",
+    ".github/workflows/",
+    "Cargo.toml",
+    "compose.test.yaml",
+    "tests/e2e.sh",
+    "tests/mock_services.py"
+  ],
+  "deployment_workflow": "backend-deploy.yml",
+  "deployment_job": "deploy",
+  "wiki_branch": "master"
+}

@@ -17,9 +17,22 @@ on:
       - '.github/workflows/backend-deploy.yml'
       - '.github/actions/build-container/**'
   workflow_dispatch:
+    inputs:
+      validate_wiki_only:
+        description: 'Only validate the wiki draft and write access; never deploy or publish'
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Serialize deployment and documentation so a later release cannot overtake it.
+concurrency:
+  group: backend-deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
+    if: github.ref == 'refs/heads/main' && !inputs.validate_wiki_only
     env:
       RUST_TEST_THREADS: 4
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -82,6 +95,8 @@ jobs:
           docker push ghcr.io/${{ github.repository }}:latest
 
   deploy:
+    if: github.ref == 'refs/heads/main' && !inputs.validate_wiki_only
+    permissions: {}
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
@@ -161,3 +176,92 @@ jobs:
                 --restart=always \
                 ghcr.io/${{ github.repository }}:latest
             '
+
+
+  wiki-plan:
+    needs: deploy
+    if: >-
+      always() && ((github.ref == 'refs/heads/main' && !inputs.validate_wiki_only && needs.deploy.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.validate_wiki_only))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          ref: master
+          path: wiki
+          persist-credentials: false
+      - name: Verify the live wiki factual gate
+        if: inputs.validate_wiki_only
+        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        with:
+          operation: evaluate-wiki
+          provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
+      - name: Generate and validate the complete wiki update
+        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        with:
+          operation: plan-wiki
+          provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          wiki-draft: ${{ inputs.validate_wiki_only && 'true' || 'false' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
+          path: work/wiki-plan.json*
+          if-no-files-found: error
+          retention-days: 7
+
+  wiki-publish:
+    needs: [deploy, wiki-plan]
+    if: >-
+      always() && github.ref == 'refs/heads/main' && !inputs.validate_wiki_only &&
+      needs.deploy.result == 'success' && needs.wiki-plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          ref: master
+          path: wiki
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
+          path: wiki-plan
+      - name: Publish all wiki pages atomically
+        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        with:
+          operation: publish-wiki
+          wiki-plan-path: wiki-plan/wiki-plan.json
+
+  wiki-access:
+    if: github.event_name == 'workflow_dispatch' && inputs.validate_wiki_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          ref: master
+          path: wiki
+      - name: Verify wiki publication access without writing
+        working-directory: wiki
+        run: git push --dry-run origin HEAD:refs/heads/master
