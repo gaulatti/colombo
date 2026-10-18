@@ -159,7 +159,7 @@ criteria. The repair job requires a matching head repository before loading its
 author credential, and the writer independently rejects forks.
 
 Each repository keeps its [review contract](.github/clouseau.md) and
-[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/75455bf7d1a2930086c31ef5949186cfa7a557c0/policy/change-acceptance.md)
+[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/b697078e18f39375ac530f9a67a9ca43071451f6/policy/change-acceptance.md)
 live in Clouseau. Private bastille access is unnecessary. Production currently
 uses DeepSeek atomic grading; the read-only `check_provider` diagnostic compares
 it with Jev plus explicit DeepSeek escalation on five fixed executed fixtures,
