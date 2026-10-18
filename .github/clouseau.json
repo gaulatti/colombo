@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "base_branch": "main",
   "workflow": "backend-ci.yml",
   "verification": {
@@ -35,5 +35,12 @@
       ".github/workflows/backend-deploy.yml",
       ".github/actions/build-container/"
     ]
+  },
+  "acceptance": {
+    "examiner": "deepseek-flash",
+    "challenger": "deepseek-v4-pro",
+    "grader": "routed",
+    "grading_model": "deepseek-flash",
+    "repair_attempts": 2
   }
 }

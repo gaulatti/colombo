@@ -139,26 +139,36 @@ Full architecture, configuration, CMS contracts, deployment, and tenant administ
 ## Pull requests
 
 The Backend CI workflow uses the public [Clouseau](https://github.com/gaulatti/clouseau)
-action, pinned to a reviewed commit. It requires all tests and exactly 100% line and branch
-coverage of Colombo's application sources. The required native approval job arms auto-merge and approves only
-the verified PR revision. DeepSeek Flash assesses repository purpose, supported
-intent, and meaningful test evidence using the contract, tickets, and precedent.
-Coverage improvements and in-scope maintenance have no file/line cutoff. Product
-drift, unclear requirements, and changes to review controls need the owner's
-second opinion. Detected fake tests or bypassed behavior block approval even
-after intent confirmation; all tests and exact coverage remain mandatory. External contributions follow the same policy, with
-fork code isolated from approval credentials and secrets.
+action at an immutable reviewed revision. All tests and exact 100% application
+line and branch coverage are mandatory. Independent DeepSeek Flash and Pro
+inspectors read source, tests, requirements, and precedent; a separate atomic
+grader selects evidence-backed semantic levels. Code computes each material
+unit's fit, need, and proportionality (each must reach 80), and each causal
+technical finding's nine-factor score (70 blocks). Tests also need meaningful
+assertions and failure cases; percentages alone cannot establish integrity.
+
+The bot retains a source-linked findings ledger and complete assessment artifact.
+It approves only the verified revision and arms native protected auto-merge.
+Product direction, authority, and protected review-control changes require the
+owner's decision. Technical uncertainty holds for automated investigation;
+intent confirmation cannot waive tests, integrity, or required evidence. A
+bounded repair may change the current internal PR's existing changed paths, at
+most twice, using an author credential independent of the approval bot. Every
+new revision requires fresh CI and independent review. Forks use the same merge
+criteria. The repair job requires a matching head repository before loading its
+author credential, and the writer independently rejects forks.
 
 Each repository keeps its [review contract](.github/clouseau.md) and
-[configuration](.github/clouseau.json); shared review rules live in Clouseau.
-Private bastille access is unnecessary for contributors or CI.
-Missing or token-truncated AI responses retry automatically within the read-only
-assessment, up to three attempts with the same evidence. Token truncation increases
-the output budget from 4,096 to at most 16,384 tokens. Complete verdicts stop retries;
-exhausted attempts and other provider failures still require a second opinion.
-Only bounded attempt/outcome/token-budget details appear in diagnostic logs. Colombo also tests the exact pinned reviewer checkout directly in its mandatory CI suite: recovery, retry exhaustion, and stopping at complete negative or invalid responses.
-
-See the [shared review policy](https://github.com/gaulatti/clouseau/blob/bc4f5d2d1c220da9dd719178e3eb95f2ed56721c/policy/intent-review.md) and
+[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/b60ac157aaf4989e984e9f0694374212babb2c60/policy/change-acceptance.md)
+live in Clouseau. Private bastille access is unnecessary. Jev grades repository
+domain fit, unnecessary abstraction, and excess authority. DeepSeek grades the
+remaining factors and unresolved Jev answers in one batch per investigation;
+settled Jev answers are retained. The read-only `check_provider` diagnostic
+qualifies this combined route on six fixed executed fixtures and retains
+decisions, usage, and whole-review cost. This qualification is separate from a
+real PR merge. Provider truncation retries at most three times with
+identical evidence and 8,192/16,384/32,768 output-token limits; completed negative
+or malformed answers are never resampled for approval. See the
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
 
 CI builds the normal container once using persistent Docker-layer and Cargo
