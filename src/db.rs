@@ -28,3 +28,43 @@ pub async fn tenant_by_id(pool: &PgPool, id: i64) -> Result<Option<Tenant>, sqlx
         "SELECT id, name, ftp_username, api_key, validation_endpoint, photo_endpoint FROM tenants WHERE id = $1"
     ).bind(id).fetch_optional(pool).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+
+    #[tokio::test]
+    async fn migrations_and_tenant_queries_preserve_identity_and_optional_results() {
+        let pool = test_support::database().await;
+        let session = test_support::session("http://localhost");
+        test_support::seed(&pool, &session).await;
+        assert_eq!(
+            tenant_by_id(&pool, 1).await.unwrap().unwrap().ftp_username,
+            "photographer"
+        );
+        assert!(tenant_by_id(&pool, -1).await.unwrap().is_none());
+        assert_eq!(
+            tenant_by_username(&pool, "photographer")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            1
+        );
+        assert!(
+            tenant_by_username(&pool, "missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut config = test_support::config();
+        for enabled in [false, true] {
+            config.migrations_enabled = enabled;
+            let pool = connect(&config).await.unwrap();
+            pool.close().await;
+        }
+        config.database_url = "invalid".into();
+        assert!(connect(&config).await.is_err());
+    }
+}

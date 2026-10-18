@@ -51,13 +51,14 @@ async fn run() -> Result<()> {
         metrics: metrics.clone(),
         metrics_token: Arc::from(config.metrics_token.clone().unwrap_or_default()),
     };
+    let http = http::serve(config.http_port, state);
     if config.ftp_enabled {
         tokio::try_join!(
-            http::serve(config.http_port, state),
+            async { http.await.context("HTTP listener failed") },
             ftp::serve(config, pool, cms, uploads, metrics)
         )?;
     } else {
-        http::serve(config.http_port, state).await?;
+        http.await?;
     }
     Ok(())
 }

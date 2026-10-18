@@ -121,6 +121,71 @@ mod tests {
         value.sequence_endpoint = Some("/sequence".into());
         assert!(value.valid());
     }
+
+    #[test]
+    fn naming_policy_rejects_each_invalid_contract_field() {
+        let base = UploadNamingPolicy {
+            version: 1,
+            assignment_slug: "news".into(),
+            path: vec![],
+            filename: vec![UploadNamingSegment {
+                kind: "placeholder".into(),
+                value: None,
+                name: Some("sequence".into()),
+                format: None,
+                width: Some(4),
+            }],
+            timezone: "UTC".into(),
+            capture_time_fallback: "uploadedTime".into(),
+            case_mode: "preserve".into(),
+        };
+        for field in 0..9 {
+            let mut policy = base.clone();
+            match field {
+                0 => policy.version = 2,
+                1 => policy.assignment_slug = " ".into(),
+                2 => policy.filename.clear(),
+                3 => policy.filename[0].kind = "literal".into(),
+                4 => policy.filename[0].name = None,
+                5 => policy.timezone = " ".into(),
+                6 => policy.capture_time_fallback = "unknown".into(),
+                7 => policy.case_mode = "unknown".into(),
+                _ => policy.filename[0].name = Some("assignmentSlug".into()),
+            }
+            assert!(!policy.valid(), "accepted invalid field {field}");
+        }
+        for fallback in ["uploadedTime", "reject"] {
+            for case in ["preserve", "lowercase", "uppercase"] {
+                let mut policy = base.clone();
+                policy.capture_time_fallback = fallback.into();
+                policy.case_mode = case.into();
+                assert!(policy.valid());
+            }
+        }
+        let mut creds = credentials();
+        creds.naming_policy = Some(base);
+        creds.sequence_endpoint = Some(" ".into());
+        assert!(!creds.valid());
+        creds.naming_policy.as_mut().unwrap().version = 2;
+        assert!(!creds.valid());
+    }
+
+    #[test]
+    fn debug_and_serialization_never_disclose_authentication_material() {
+        let session = crate::test_support::session("http://localhost");
+        let debug = format!("{:?}", session);
+        for secret in [
+            "fictional-api-key",
+            "fictional-client-key",
+            "secret",
+            "token",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        let serialized = serde_json::to_string(&session.tenant).unwrap();
+        assert!(!serialized.contains("fictional-api-key"));
+        assert!(!serialized.contains("api_key"));
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

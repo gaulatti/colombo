@@ -199,3 +199,161 @@ pub enum CallbackOutcome {
     Accepted,
     Denied,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{Mock, session, validation};
+
+    #[tokio::test]
+    async fn validation_enforces_status_payload_and_credentials_and_records_outcomes() {
+        let metrics = Metrics::new("cms-test").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        for (status, body, expected) in [
+            (200, validation(&session("http://unused")), "success"),
+            (401, "{}".into(), "denied"),
+            (503, "{}".into(), "unavailable"),
+            (200, "not json".into(), "unavailable"),
+            (
+                200,
+                validation(&{
+                    let mut s = session("http://unused");
+                    s.assignment_id = " ".into();
+                    s
+                }),
+                "denied",
+            ),
+            (
+                200,
+                validation(&{
+                    let mut s = session("http://unused");
+                    s.upload.as_mut().unwrap().bucket.clear();
+                    s
+                }),
+                "denied",
+            ),
+        ] {
+            let server = Mock::new(vec![(status, body)]).await;
+            let tenant = session(&server.url).tenant;
+            let result = client
+                .validate(&tenant, "fictional-password", "validation_upload")
+                .await;
+            match expected {
+                "success" => {
+                    let result = result.unwrap();
+                    assert_eq!(result.assignment_id, "assignment-123");
+                    assert_eq!(result.validation_key.as_deref(), Some("fictional-password"));
+                }
+                "denied" => assert!(matches!(result, Err(ValidationError::Denied))),
+                _ => assert!(matches!(result, Err(ValidationError::Unavailable(_)))),
+            }
+            let request = &server.requests()[0];
+            assert_eq!(request.uri, "/validate");
+            assert_eq!(request.headers["X-Colombo-API-Key"], "fictional-api-key");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+                serde_json::json!({"key":"fictional-password"})
+            );
+        }
+        let mut tenant = session("http://unused").tenant;
+        tenant.validation_endpoint = "invalid://endpoint".into();
+        let result = client
+            .validate(&tenant, "key", "validation_upload")
+            .await
+            .unwrap_err();
+        assert!(matches!(result, ValidationError::Unavailable(_)));
+        assert_eq!(ValidationError::Denied.to_string(), "credentials denied");
+        assert_eq!(result.to_string(), "CMS unavailable");
+        let text = String::from_utf8(metrics.encode().unwrap()).unwrap();
+        for result in ["success", "denied", "unavailable"] {
+            assert!(text.contains(&format!(
+                "operation=\"validation_upload\",result=\"{result}\""
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn sequence_requires_context_positive_number_and_successful_reply() {
+        let client = CmsClient::new(Metrics::new("test").unwrap()).unwrap();
+        for (status, body, expected) in [
+            (200, r#"{"sequence":7}"#, Some(7)),
+            (200, r#"{"sequence":"9"}"#, Some(9)),
+            (200, r#"{"sequence":0}"#, None),
+            (200, r#"{"sequence":"bad"}"#, None),
+            (200, r#"{"sequence":{}}"#, None),
+            (200, "not json", None),
+            (403, "{}", None),
+        ] {
+            let server = Mock::new(vec![(status, body.into())]).await;
+            let mut s = session(&server.url);
+            s.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
+            let result = client.next_sequence(&s).await;
+            if let Some(n) = expected {
+                assert_eq!(result.unwrap(), n);
+            } else {
+                assert!(result.is_err());
+            }
+            let request = &server.requests()[0];
+            assert_eq!(request.uri, "/sequence");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+                serde_json::json!({"assignment_id":"assignment-123"})
+            );
+        }
+        let mut s = session("invalid://url");
+        assert!(client.next_sequence(&s).await.is_err());
+        s.upload.as_mut().unwrap().sequence_endpoint = Some("http://[".into());
+        assert!(client.next_sequence(&s).await.is_err());
+        s.tenant.validation_endpoint = "http://localhost".into();
+        assert!(client.next_sequence(&s).await.is_err());
+        s.upload.as_mut().unwrap().sequence_endpoint = Some("invalid://endpoint".into());
+        assert!(client.next_sequence(&s).await.is_err());
+        s.upload = None;
+        assert!(client.next_sequence(&s).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn callback_preserves_payload_and_distinguishes_denial_from_retryable_failure() {
+        let metrics = Metrics::new("test").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        for (status, outcome) in [
+            (204, Some(CallbackOutcome::Accepted)),
+            (403, Some(CallbackOutcome::Denied)),
+            (503, None),
+        ] {
+            let server = Mock::new(vec![(status, String::new())]).await;
+            let result = client
+                .photo_callback(
+                    &session(&server.url),
+                    "s3://uploads/key",
+                    "original.jpg",
+                    "target.jpg",
+                )
+                .await;
+            if let Some(outcome) = outcome {
+                assert_eq!(result.unwrap(), outcome);
+            } else {
+                assert!(result.is_err());
+            }
+            let request = &server.requests()[0];
+            assert_eq!(request.uri, "/photo");
+            assert_eq!(request.headers["X-Colombo-API-Key"], "fictional-api-key");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+                serde_json::json!({"assignment_id":"assignment-123","s3_url":"s3://uploads/key","original_filename":"original.jpg","target_filename":"target.jpg"})
+            );
+        }
+        let mut s = session("http://unused");
+        s.tenant.photo_endpoint = "invalid://endpoint".into();
+        assert!(
+            client
+                .photo_callback(&s, "s3://uploads/key", "original", "target")
+                .await
+                .is_err()
+        );
+        let text = String::from_utf8(metrics.encode().unwrap()).unwrap();
+        for result in ["success", "denied", "error"] {
+            assert!(text.contains(&format!("operation=\"photo_callback\",result=\"{result}\"")));
+        }
+    }
+}

@@ -2,8 +2,12 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-cert_dir="$(mktemp -d)"
+cert_dir="$(mktemp -d "$repo_dir/tests/.e2e-certs.XXXXXX")"
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    docker compose -f "$repo_dir/compose.yaml" logs --no-color colombo postgres mocks >&2 || true
+  fi
   docker compose -f "$repo_dir/compose.yaml" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$cert_dir"
 }
@@ -58,7 +62,11 @@ export COLOMBO_FTPS_PRIVATE_KEY_PATH=/certs/key.pem
 export COLOMBO_HTTP_HOST_PORT=18081
 export COLOMBO_FTP_HOST_PORT=12121
 
-docker compose -f "$repo_dir/compose.yaml" up --build --wait
+if [ "${COLOMBO_E2E_SKIP_BUILD:-0}" = 1 ]; then
+  docker compose -f "$repo_dir/compose.yaml" up --no-build --wait
+else
+  docker compose -f "$repo_dir/compose.yaml" up --build --wait
+fi
 docker compose -f "$repo_dir/compose.yaml" exec -T postgres psql -U colombo -d colombo -v ON_ERROR_STOP=1 -c \
   "INSERT INTO tenants (name, ftp_username, api_key, validation_endpoint, photo_endpoint) VALUES ('Test tenant', 'photographer', 'tenant-api-key', 'http://mocks:18080/validate', 'http://mocks:18080/photo')"
 tenant_list="$(printf '1\n\n7\n' | docker compose -f "$repo_dir/compose.yaml" exec -T colombo tenants-cli)"

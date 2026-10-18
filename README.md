@@ -102,20 +102,44 @@ Useful commands:
 | `make package` | Build the release binary |
 | `make tenants` | Open the tenant CRUD CLI |
 
+`make test` and `make verify` start a disposable PostgreSQL test service on
+loopback port `55436`. Tests use separate schemas, fictional credentials, and
+local CMS/S3 servers. The local test database uses memory-backed storage. Both
+commands remove it on exit; `make test-db-stop` removes a manually started service.
+CI provides the same PostgreSQL service. For a separately managed disposable
+database, run Cargo directly with `COLOMBO_TEST_DATABASE_URL` set explicitly.
+
+The tests exercise CMS failures, FTP session isolation, multipart streaming and
+disk failures, naming and EXIF metadata, durable recovery, bounded S3/callback
+retries, receipt isolation, and process startup/shutdown. HTTP temporary files
+remain owned until durable acceptance or rejection, including malformed trailing
+multipart input. Both HTTP and FTP listeners shut down on Ctrl+C.
+
 Full architecture, configuration, CMS contracts, deployment, and tenant administration documentation is maintained in the [repository wiki](https://github.com/gaulatti/colombo/wiki).
 
 ## Pull requests
 
-The Backend CI workflow requires all tests and exactly 100% line and branch
-coverage of Colombo's application sources. It arms auto-merge and approves only
-the verified PR revision. Small bug fixes are assessed against existing behavior,
-ticket criteria, and repository precedent using DeepSeek Flash. Major changes or
-unclear intent request a maintainer's second opinion; that confirmation never
-waives tests or coverage. External contributions follow the same policy, with
+The Backend CI workflow uses the public [Clouseau](https://github.com/gaulatti/clouseau)
+action, pinned to a reviewed commit. It requires all tests and exactly 100% line and branch
+coverage of Colombo's application sources. The required native approval job arms auto-merge and approves only
+the verified PR revision. DeepSeek Flash assesses repository purpose, supported
+intent, and meaningful test evidence using the contract, tickets, and precedent.
+Coverage improvements and in-scope maintenance have no file/line cutoff. Product
+drift, unclear requirements, and changes to review controls need the owner's
+second opinion. Detected fake tests or bypassed behavior block approval even
+after intent confirmation; all tests and exact coverage remain mandatory. External contributions follow the same policy, with
 fork code isolated from approval credentials and secrets.
 
-See the [approval policy](.github/ci/APPROVAL.md) and
+Each repository keeps its [review contract](.github/clouseau.md) and
+[configuration](.github/clouseau.json); shared review rules live in Clouseau.
+Private bastille access is unnecessary for contributors or CI.
+
+See the [shared review policy](https://github.com/gaulatti/clouseau/blob/07c4f7373fb723bbfc9b76cbe306809eac3f4413/policy/intent-review.md) and
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
+
+CI builds the normal container once using persistent Docker-layer and Cargo
+cache mounts. The integration suite exercises that image; CD pushes the tested
+image without rebuilding it. Intent comments reuse the existing verification.
 
 ## Java versus Rust benchmark
 

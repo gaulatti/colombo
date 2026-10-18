@@ -8,3 +8,6 @@ pub mod metrics;
 pub mod naming;
 pub mod spool;
 pub mod upload;
+
+#[cfg(test)]
+mod test_support;

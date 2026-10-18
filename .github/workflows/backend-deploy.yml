@@ -15,11 +15,29 @@ on:
       - 'scripts/**'
       - 'tests/**'
       - '.github/workflows/backend-deploy.yml'
+      - '.github/actions/build-container/**'
   workflow_dispatch:
 
 jobs:
   build-and-push:
+    env:
+      RUST_TEST_THREADS: 4
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: colombo
+          POSTGRES_PASSWORD: colombo
+          POSTGRES_DB: colombo
+        ports:
+          - 55436:5432
+        options: >-
+          --health-cmd "pg_isready -U colombo -d colombo"
+          --health-interval 2s --health-timeout 5s --health-retries 20
     permissions:
       contents: read
       packages: write
@@ -31,27 +49,36 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - name: Verify Rust service
         run: |
           cargo fmt --all -- --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
+          cargo llvm-cov --locked --all-features \
+            --no-cfg-coverage --no-cfg-coverage-nightly \
+            --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v5
         with:
           files: lcov.info
           fail_ci_if_error: false
           use_oidc: true
+      - name: Build verification container
+        uses: ./.github/actions/build-container
       - name: Verify container boundary
+        env:
+          COLOMBO_TEST_IMAGE: colombo:ci
+          COLOMBO_E2E_SKIP_BUILD: '1'
         run: ./tests/e2e.sh
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.DEPLOYMENT_TOKEN }}
-      - name: Build and push image
+      - name: Push verified image
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:latest .
+          docker tag colombo:ci ghcr.io/${{ github.repository }}:latest
           docker push ghcr.io/${{ github.repository }}:latest
 
   deploy:

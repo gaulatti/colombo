@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "base_branch": "main",
+  "workflow": "backend-ci.yml",
+  "verification": {
+    "job": "verify",
+    "steps": [
+      "Test approval policy",
+      "Rust format and lint",
+      "Run all targets with branch instrumentation",
+      "Run documentation tests",
+      "Build verification container",
+      "Verify container boundary",
+      "Enforce 100% line and branch coverage"
+    ]
+  },
+  "manual_reviewer": "gaulatti",
+  "repository_policy": ".github/clouseau.md",
+  "readme": "README.md",
+  "sensitive_paths": [],
+  "deployment": {
+    "workflow": "backend-deploy.yml",
+    "paths": [
+      "src/",
+      "migrations/",
+      "vendor/",
+      "scripts/",
+      "tests/",
+      "Cargo.toml",
+      "Cargo.lock",
+      "Dockerfile",
+      ".dockerignore",
+      "compose.yaml",
+      ".github/workflows/backend-deploy.yml",
+      ".github/actions/build-container/"
+    ]
+  }
+}
