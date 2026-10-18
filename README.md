@@ -158,7 +158,7 @@ new revision requires fresh CI and independent review. Forks use the same merge
 criteria and never receive privileged repair credentials.
 
 Each repository keeps its [review contract](.github/clouseau.md) and
-[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/bfc759d21e96a0eadcd925adf628367b42f9c0b4/policy/change-acceptance.md)
+[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/8554de1fc01bbc746a9ba4c20185ee3d7a579e18/policy/change-acceptance.md)
 live in Clouseau. Private bastille access is unnecessary. Production currently
 uses DeepSeek atomic grading; the read-only `check_provider` diagnostic compares
 it with Jev plus explicit DeepSeek escalation on five fixed executed fixtures,
