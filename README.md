@@ -137,7 +137,7 @@ Missing or token-truncated AI responses retry automatically within the read-only
 assessment, up to three attempts with the same evidence. Token truncation increases
 the output budget from 4,096 to at most 16,384 tokens. Complete verdicts stop retries;
 exhausted attempts and other provider failures still require a second opinion.
-Only bounded attempt/outcome/token-budget details appear in diagnostic logs.
+Only bounded attempt/outcome/token-budget details appear in diagnostic logs. Colombo also tests the exact pinned reviewer checkout directly in its mandatory CI suite: recovery, retry exhaustion, and stopping at complete negative or invalid responses.
 
 See the [shared review policy](https://github.com/gaulatti/clouseau/blob/bc4f5d2d1c220da9dd719178e3eb95f2ed56721c/policy/intent-review.md) and
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).
