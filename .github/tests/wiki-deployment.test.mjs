@@ -179,19 +179,19 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
   const requests = [];
   globalThis.fetch = async (_, options) => {
     const body = JSON.parse(options.body); requests.push(body);
-    const evidence = JSON.parse(body.messages[1].content);
+    const evidence = JSON.parse(body.input[1].content);
     const supported = evidence.proposed_update[0].content.includes('Temporary upstream unavailability returns 502');
     const verdict = supported ? {supported: true, findings: [], evidence: evidence.proposed_update.map(page => ({page: page.path, source_id: Object.keys(evidence.source_evidence)[0]}))} :
       {supported: false, findings: ['The production match maps Unavailable to 502.'], evidence: []};
-    return {ok: true, json: async () => ({choices: [{finish_reason: 'stop', message: {content: JSON.stringify(verdict)}}]})};
+    return {ok: true, json: async () => ({status: 'completed', output: [{type: 'message', role: 'assistant', content: [{type: 'output_text', text: JSON.stringify(verdict)}]}]})};
   };
   try {await evaluateWiki();}
   finally {globalThis.fetch = original;}
   assert.equal(requests.length, 2);
   for (const body of requests) {
-    assert.deepEqual(body.thinking, {type: 'disabled'});
-    assert.equal(body.reasoning_effort, undefined);
-    assert.deepEqual(body.response_format, {type: 'json_object'});
+    assert.deepEqual(body.reasoning, {effort: 'none'});
+    assert.equal(body.text.format.type, 'json_schema');
+    assert.deepEqual(body.text.format.schema.required, ['supported', 'findings', 'evidence']);
     assert.equal(body.tools, undefined);
   }
 });
@@ -250,4 +250,25 @@ test('wiki citations resolve immutable source lines and refuse blanks, invented 
     assert.equal(calls, 3);
     assert.deepEqual(diagnostics[0].source_evidence, {'README.md:L1': '', 'README.md:L2': '# Upload gateway', 'README.md:L3': ''});
   }
+});
+
+test('production wiki transport enforces separate native schemas for plan, requested page and factual review', async () => {
+  const original = globalThis.fetch, requests = [];
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.deepseek.com/responses');
+    const body = JSON.parse(options.body); requests.push(body);
+    const input = JSON.parse(body.input[1].content);
+    const result = input.proposed_update ?
+      {supported: true, findings: [], evidence: [{page: 'Home.md', source_id: Object.keys(input.source_evidence)[0]}]} :
+      input.requested_page ? {path: 'Home.md', content: '# Upload gateway\nThe spool is persistent.'} :
+      {pages: [{path: 'Home.md', reason: 'Durable acceptance documentation'}]};
+    return {ok: true, json: async () => ({status: 'completed', output: [{type: 'message', role: 'assistant', content: [{type: 'output_text', text: JSON.stringify(result)}]}]})};
+  };
+  try {
+    const bundle = await planWiki({identity, source: {'README.md': 'The spool is persistent.'}, wiki: {'Home.md': '# Home'}});
+    assert.match(bundle.updates[0].content, /spool is persistent/);
+  } finally {globalThis.fetch = original;}
+  assert.deepEqual(requests.map(body => body.text.format.schema.required), [['pages'], ['path', 'content'], ['supported', 'findings', 'evidence']]);
+  assert.ok(requests.every(body => body.text.format.type === 'json_schema' && body.text.format.schema.additionalProperties === false));
+  assert.deepEqual(requests[1].text.format.schema.properties.path.enum, ['Home.md']);
 });

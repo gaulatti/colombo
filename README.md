@@ -180,7 +180,7 @@ Normal post-deployment runs use the built-in GitHub token for wiki publication a
 `DEEPSEEK_API_KEY` only in the read-only generation job. No additional wiki secret
 is required when the repository token has wiki write access.
 
-Wiki calls use DeepSeek Flash in non-thinking JSON mode so their bounded response
+Wiki calls use DeepSeek Flash in non-thinking structured-output mode so their bounded response
 budget is available for the documentation and source citations. PR assessment
 keeps its existing reasoning mode. The independent factual gate still applies to
 every proposed wiki update before publication.
@@ -197,3 +197,19 @@ lines. The model cannot supply its own quotation text. Missing, invented, blank,
 or incomplete page references fail validation; the workflow diagnostic includes
 the source-line map for inspection. Every request keeps the complete evidence
 within its explicit context limit or fails without publication.
+
+Planning, page generation, and factual review each have a native response schema
+on DeepSeek's Responses API, in addition to all local checks. PR review stays on
+its existing API and reasoning policy. This keeps response shape enforcement
+separate from the substantive correctness and publication decisions.
+
+The application coverage checker comes from the CI-pinned Clouseau checkout at
+`.clouseau-ci`. After producing the instrumented `coverage.json` report, the
+local equivalent of the enforcement step is:
+
+```sh
+python3 .clouseau-ci/src/check_coverage.py coverage.json src
+```
+
+Use the exact Clouseau revision checked out by `backend-ci.yml`; the same checkout
+is required by the workflow integration tests in `.github/tests`.
