@@ -9,3 +9,6 @@ coverage
 benchmarks
 tests
 *.md
+
+# Exact shared reviewer checkout used only by CI integration tests
+.clouseau-ci/

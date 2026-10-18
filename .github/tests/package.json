@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test routing.test.mjs"
+    "test": "node --test *.test.mjs"
   },
   "devDependencies": {
     "@actions/expressions": "0.3.61",
