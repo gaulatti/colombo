@@ -284,3 +284,13 @@ test('rejected wiki planning values remain inspectable and cannot reach generati
   assert.equal(diagnostics[0].stage, 'planning');
   assert.deepEqual(diagnostics[0].plan, plan);
 });
+
+test('invalid factual report values remain diagnosable without allowing a publishable bundle', async () => {
+  const diagnostics = [], invalid = {supported: true, findings: [null], evidence: []};
+  await assert.rejects(planWiki({identity, source: {'README.md': 'Upload gateway.'}, wiki: {'Home.md': '# Home'}, diagnostic: value => diagnostics.push(value), complete: async ({messages}) => {
+    const input = JSON.parse(messages[1].content);
+    return {content: JSON.stringify(input.proposed_update ? invalid : input.requested_page ? {path: 'Home.md', content: '# Upload gateway'} : {pages: [{path: 'Home.md', reason: 'Gateway documentation'}]})};
+  }}), /Invalid wiki factual review/);
+  assert.equal(diagnostics[0].stage, 'factual-review');
+  assert.deepEqual(diagnostics[0].review, invalid);
+});
