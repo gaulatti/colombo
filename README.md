@@ -176,7 +176,8 @@ After the existing `Backend Deploy` workflow's `deploy` job succeeds on `main`,
 DeepSeek prepares a coordinated update to the repository wiki. Clouseau reads the
 exact deployed source revision and current wiki, plans every affected page, then
 generates and validates the complete batch, including navigation and page links.
-A separate DeepSeek call fact-checks the full update against production source;
+Flash plans and writes the pages; an independent DeepSeek V4 Pro call fact-checks
+the full update against production source;
 it must support every updated page with a reference to an exact source line and no findings.
 Unsupported claims, invented source references, or missing page evidence stop publication.
 The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
@@ -192,7 +193,8 @@ workflow visibly fail; it does not roll back or claim external service health.
 
 For a safe preflight, manually run `Backend Deploy` with `validate_wiki_only: true`.
 It verifies the live factual gate against supported and deliberately false
-authentication claims, generates a real DeepSeek draft artifact, and checks wiki
+authentication and protocol-refresh claims, generates a real DeepSeek draft
+artifact, and checks wiki
 Git write access with
 `git push --dry-run`; it skips image builds, deployment, and wiki publication.
 Normal post-deployment runs use the built-in GitHub token for wiki publication and
