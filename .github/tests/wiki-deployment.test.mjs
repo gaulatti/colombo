@@ -175,7 +175,7 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
 });
 
 
-test('live wiki diagnostic uses the production non-thinking transport while retaining substantive negative review', async () => {
+test('live wiki diagnostic uses the production Pro reasoning transport while retaining substantive negative review', async () => {
   const original = globalThis.fetch;
   const requests = [];
   globalThis.fetch = async (_, options) => {
@@ -190,11 +190,12 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
   finally {globalThis.fetch = original;}
   assert.equal(requests.length, 4);
   for (const body of requests) {
-    assert.deepEqual(body.thinking, {type: 'disabled'});
+    assert.deepEqual(body.thinking, {type: 'enabled'});
+    assert.equal(body.reasoning_effort, 'low');
     assert.equal(body.model, 'deepseek-v4-pro');
     assert.equal(body.tools[0].function.strict, true);
     assert.deepEqual(body.tools[0].function.parameters.required, ['pages']);
-    assert.deepEqual(body.tool_choice, {type: 'function', function: {name: 'wiki_result'}});
+    assert.equal(body.tool_choice, 'auto');
   }
 });
 

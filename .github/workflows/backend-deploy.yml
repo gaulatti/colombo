@@ -201,12 +201,12 @@ jobs:
           persist-credentials: false
       - name: Verify the live wiki factual gate
         if: inputs.validate_wiki_only
-        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
+        uses: gaulatti/clouseau@85ae237712fdd737b8859d74706a11dca05f03e6
         with:
           operation: evaluate-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Generate and validate the complete wiki update
-        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
+        uses: gaulatti/clouseau@85ae237712fdd737b8859d74706a11dca05f03e6
         with:
           operation: plan-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -245,7 +245,7 @@ jobs:
           name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
           path: wiki-plan
       - name: Publish all wiki pages atomically
-        uses: gaulatti/clouseau@5d21901ec28d82661500be3377a03ebe71cde0ff
+        uses: gaulatti/clouseau@85ae237712fdd737b8859d74706a11dca05f03e6
         with:
           operation: publish-wiki
           wiki-plan-path: wiki-plan/wiki-plan.json

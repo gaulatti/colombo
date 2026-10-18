@@ -201,10 +201,10 @@ Normal post-deployment runs use the built-in GitHub token for wiki publication a
 `DEEPSEEK_API_KEY` only in the read-only generation job. No additional wiki secret
 is required when the repository token has wiki write access.
 
-Wiki calls use DeepSeek Flash in non-thinking structured-output mode so their bounded response
-budget is available for the documentation and source citations. PR assessment
-keeps its existing reasoning mode. The independent factual gate still applies to
-every proposed wiki update before publication.
+Wiki planning and writing use DeepSeek Flash without reasoning. The independent
+V4 Pro factual checker uses low reasoning effort to trace shared production paths
+and challenge retained claims. PR assessment keeps its existing reasoning mode.
+Every proposed page must pass factual review before publication.
 
 If factual review rejects a draft with actionable findings, the generator may
 produce up to three corrected batches. Each must change the rejected text and pass a fresh
