@@ -13,7 +13,8 @@ const require = createRequire(import.meta.url);
 const shared = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
 const {planWiki, validateBundle, validateConfig, evaluateWiki} = require(`${shared}/wiki.cjs`);
 const {publishWiki} = require(`${shared}/wiki-git.cjs`);
-const facts = (pages, source) => ({supported: true, findings: [], evidence: pages.map(page => ({page: page.path, source_id: `${Object.keys(source)[0]}:L1`}))});
+const facts = (pages, source) => ({pages: Object.fromEntries(pages.map(page => [page.path, {source_id: `${Object.keys(source)[0]}:L1`, findings: '', supported: true}]))});
+const rejection = (page, sourceId, finding) => ({pages: {[page]: {source_id: sourceId, findings: finding, supported: false}}});
 const identity = {repository: 'example/upload-gateway', source_sha: 'a'.repeat(40), wiki_base_sha: 'b'.repeat(40), deployment_run_id: 123};
 const context = (event, ref, draft, deployed = 'success', planned = 'success') => ({
   github: {event_name: event, ref}, inputs: {validate_wiki_only: draft},
@@ -162,9 +163,9 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
   const wiki = {'Home.md': '# Home'};
   const page = {path: 'Home.md', content: '# Home\nNetwork failures are denial.'};
   for (const review of [
-    {supported: false, findings: ['Network failures are Unavailable in production, not Denied.'], evidence: []},
-    {supported: true, findings: [], evidence: [{page: 'Home.md', source_id: 'src/cms.rs:L99999'}]},
-    {supported: true, findings: [], evidence: []},
+    rejection('Home.md', 'src/cms.rs:L1', 'Network failures are Unavailable in production, not Denied.'),
+    {pages: {'Home.md': {source_id: 'src/cms.rs:L99999', findings: '', supported: true}}},
+    {pages: {}},
   ]) {
     let calls = 0;
     await assert.rejects(planWiki({identity, source, wiki, allowCorrection: false, complete: async () => ({content: JSON.stringify(++calls === 1 ?
@@ -181,8 +182,7 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
     const body = JSON.parse(options.body); requests.push(body);
     const evidence = JSON.parse(body.messages[1].content);
     const supported = evidence.proposed_update[0].content.includes('Temporary upstream unavailability returns 502');
-    const verdict = supported ? {supported: true, findings: [], evidence: evidence.proposed_update.map(page => ({page: page.path, source_id: Object.keys(evidence.source_evidence)[0]}))} :
-      {supported: false, findings: ['The production match maps Unavailable to 502.'], evidence: []};
+    const verdict = {pages: Object.fromEntries(evidence.proposed_update.map(page => [page.path, {source_id: Object.keys(evidence.source_evidence)[0], findings: supported ? '' : 'The production match maps Unavailable to 502.', supported}]))};
     return {ok: true, json: async () => ({choices: [{finish_reason: 'tool_calls', message: {tool_calls: [{type: 'function', function: {name: 'wiki_result', arguments: JSON.stringify(verdict)}}]}}]})};
   };
   try {await evaluateWiki();}
@@ -191,7 +191,7 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
   for (const body of requests) {
     assert.deepEqual(body.thinking, {type: 'disabled'});
     assert.equal(body.tools[0].function.strict, true);
-    assert.deepEqual(body.tools[0].function.parameters.required, ['evidence', 'findings', 'supported']);
+    assert.deepEqual(body.tools[0].function.parameters.required, ['pages']);
     assert.deepEqual(body.tool_choice, {type: 'function', function: {name: 'wiki_result'}});
   }
 });
@@ -203,12 +203,12 @@ test('a rejected wiki draft is corrected from findings and only changed, freshly
   const bundle = await planWiki({identity, source, wiki, diagnostic: result => diagnostics.push(result), complete: async ({messages}) => {
     const input = JSON.parse(messages[1].content); requests.push(input);
     if (input.proposed_update) return {content: JSON.stringify(input.proposed_update[0].content.includes('502') ? facts(input.proposed_update, source) :
-      {supported: false, findings: ['Unavailable maps to 502, not 401.'], evidence: []})};
+      rejection('Home.md', 'src/auth.rs:L1', 'Unavailable maps to 502, not 401.'))};
     if (input.requested_page) return {content: JSON.stringify({path: 'Home.md', content: '# Home\nUnavailable returns ' + (input.review_findings.length ? '502' : '401')})};
     return {content: JSON.stringify({pages: [{path: 'Home.md', reason: 'HTTP status contract'}]})};
   }});
   assert.equal(requests.length, 5);
-  assert.deepEqual(requests[3].review_findings, ['Unavailable maps to 502, not 401.']);
+  assert.deepEqual(requests[3].review_findings, ['Home.md: Unavailable maps to 502, not 401.']);
   assert.deepEqual(requests[3].previous_update, requests[2].proposed_update);
   assert.notDeepEqual(requests[2].proposed_update, requests[4].proposed_update);
   assert.equal(bundle.updates[0].content, '# Home\nUnavailable returns 502');
@@ -220,7 +220,7 @@ test('wiki correction never resubmits rejected text or continues after its fixed
     let renders = 0, reviews = 0;
     await assert.rejects(planWiki({identity, source: {'README.md': 'Unavailable returns 502.'}, wiki: {'Home.md': '# Home'}, complete: async ({messages}) => {
       const input = JSON.parse(messages[1].content);
-      if (input.proposed_update) {reviews++; return {content: JSON.stringify({supported: false, findings: ['Wrong status.'], evidence: []})};}
+      if (input.proposed_update) {reviews++; return {content: JSON.stringify(rejection('Home.md', 'README.md:L1', 'Wrong status.'))};}
       if (input.requested_page) {renders++; return {content: JSON.stringify({path: 'Home.md', content: '# Home\nWrong status.' + (!unchanged ? ` Still wrong ${renders}.` : '')})};}
       return {content: JSON.stringify({pages: [{path: 'Home.md', reason: 'HTTP status'}]})};
     }}), unchanged ? /did not change/ : /did not support/);
@@ -242,11 +242,11 @@ test('wiki citations resolve immutable source lines and refuse blanks, invented 
     const result = planWiki({identity, source, wiki: {'Home.md': '# Home'}, diagnostic: value => diagnostics.push(value), complete: async ({messages}) => {
       calls++;
       const input = JSON.parse(messages[1].content);
-      return {content: JSON.stringify(input.proposed_update ? {supported: true, findings: [], evidence: [evidence]} :
+      return {content: JSON.stringify(input.proposed_update ? {pages: {'Home.md': {source_id: evidence.source_id, findings: '', supported: true, ...(Object.hasOwn(evidence, 'quote') ? {quote: evidence.quote} : {})}}} :
         input.requested_page ? {path: 'Home.md', content: '# Upload gateway'} : {pages: [{path: 'Home.md', reason: 'Gateway documentation'}]})};
     }});
     if (evidence.source_id === 'README.md:L2' && !Object.hasOwn(evidence, 'quote')) assert.equal((await result).updates[0].content, '# Upload gateway');
-    else await assert.rejects(result, /exact source evidence/);
+    else await assert.rejects(result, /exact source evidence|Invalid wiki factual review/);
     assert.equal(calls, 3);
     assert.deepEqual(diagnostics[0].source_evidence, {'README.md:L1': '', 'README.md:L2': '# Upload gateway', 'README.md:L3': ''});
   }
@@ -259,7 +259,7 @@ test('production wiki transport enforces separate native schemas for plan, reque
     const body = JSON.parse(options.body); requests.push(body);
     const input = JSON.parse(body.messages[1].content);
     const result = input.proposed_update ?
-      {supported: true, findings: [], evidence: [{page: 'Home.md', source_id: Object.keys(input.source_evidence)[0]}]} :
+      {pages: {'Home.md': {source_id: Object.keys(input.source_evidence)[0], findings: '', supported: true}}} :
       input.requested_page ? {path: 'Home.md', content: '# Upload gateway\nThe spool is persistent.'} :
       {pages: [{path: 'Home.md', reason: 'Durable acceptance documentation'}]};
     return {ok: true, json: async () => ({choices: [{finish_reason: 'tool_calls', message: {tool_calls: [{type: 'function', function: {name: 'wiki_result', arguments: JSON.stringify(result)}}]}}]})};
@@ -268,7 +268,7 @@ test('production wiki transport enforces separate native schemas for plan, reque
     const bundle = await planWiki({identity, source: {'README.md': 'The spool is persistent.'}, wiki: {'Home.md': '# Home'}});
     assert.match(bundle.updates[0].content, /spool is persistent/);
   } finally {globalThis.fetch = original;}
-  assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['evidence', 'findings', 'supported']]);
+  assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['pages']]);
   assert.ok(requests.every(body => body.tools[0].function.strict === true && body.tools[0].function.parameters.additionalProperties === false));
   assert.deepEqual(requests[1].tools[0].function.parameters.properties.path.enum, ['Home.md']);
 });
@@ -286,11 +286,33 @@ test('rejected wiki planning values remain inspectable and cannot reach generati
 });
 
 test('invalid factual report values remain diagnosable without allowing a publishable bundle', async () => {
-  const diagnostics = [], invalid = {supported: true, findings: [null], evidence: []};
+  const diagnostics = [], invalid = {pages: {'Home.md': {source_id: 'README.md:L1', findings: null, supported: true}}};
   await assert.rejects(planWiki({identity, source: {'README.md': 'Upload gateway.'}, wiki: {'Home.md': '# Home'}, diagnostic: value => diagnostics.push(value), complete: async ({messages}) => {
     const input = JSON.parse(messages[1].content);
     return {content: JSON.stringify(input.proposed_update ? invalid : input.requested_page ? {path: 'Home.md', content: '# Upload gateway'} : {pages: [{path: 'Home.md', reason: 'Gateway documentation'}]})};
   }}), /Invalid wiki factual review/);
   assert.equal(diagnostics[0].stage, 'factual-review');
   assert.deepEqual(diagnostics[0].review, invalid);
+});
+
+test('a per-page factual checklist changes only flagged pages and preserves accepted human text', async () => {
+  const source = {'README.md': 'Unavailable returns 502.'};
+  const home = '# Home\nHuman-written context.\n[Guide](Guide)';
+  const rendered = [];
+  const bundle = await planWiki({identity, source, wiki: {'Home.md': home, 'Guide.md': '[Home](Home) Guide.'}, complete: async ({messages}) => {
+    const input = JSON.parse(messages[1].content);
+    if (input.proposed_update) {
+      const review = facts(input.proposed_update, source);
+      if (input.proposed_update[0].content.includes('401')) review.pages['Guide.md'] = {source_id: 'README.md:L1', findings: 'Unavailable returns 502, not 401.', supported: false};
+      return {content: JSON.stringify(review)};
+    }
+    if (input.requested_page) {
+      rendered.push(input.requested_page);
+      return {content: JSON.stringify({path: input.requested_page, content: input.requested_page === 'Home.md' ? home : '[Home](Home) Unavailable returns ' + (input.review_findings.length ? '502.' : '401.')})};
+    }
+    return {content: JSON.stringify({pages: [{path: 'Guide.md', reason: 'Authentication'}, {path: 'Home.md', reason: 'Navigation'}]})};
+  }});
+  assert.deepEqual(rendered, ['Guide.md', 'Home.md', 'Guide.md']);
+  assert.equal(bundle.updates[1].content, home);
+  assert.match(bundle.updates[0].content, /502/);
 });

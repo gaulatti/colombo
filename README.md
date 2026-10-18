@@ -236,3 +236,8 @@ is required by the workflow integration tests in `.github/tests`.
 Factual review emits source evidence and unresolved findings before the final
 supporting verdict. Supported claims belong in evidence; a false verdict, any
 unresolved findings, or invalid source references still blocks publication.
+
+The factual report is a fixed checklist for the planned pages: one exact source
+reference, bounded unresolved findings, and a verdict for each page. Every page
+must pass, with no contradictions between its findings and verdict. Correction
+regenerates only flagged pages and preserves the other page bytes exactly.
