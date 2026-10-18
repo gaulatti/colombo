@@ -9,7 +9,11 @@
     "Makefile",
     "scripts/",
     ".env.example",
-    ".github/workflows/"
+    ".github/workflows/",
+    "Cargo.toml",
+    "compose.test.yaml",
+    "tests/e2e.sh",
+    "tests/mock_services.py"
   ],
   "deployment_workflow": "backend-deploy.yml",
   "deployment_job": "deploy",

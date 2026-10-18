@@ -126,3 +126,21 @@ test('publisher independently refuses a failed real deployment before any Git wr
     paginate: async () => [{name: 'deploy', status: 'completed', conclusion: 'failure'}]};
   await assert.rejects(publishWiki({github, context: apiContext, config, sourceDirectory: '/never-read', wikiDirectory: '/never-written', bundle: {}}), /completed successful deployment/);
 });
+
+
+test('wiki-only format recovery keeps evidence identical and rejects an exhausted envelope budget', async () => {
+  const wiki = {'Home.md': '# Home'};
+  const page = {path: 'Home.md', content: '# Home\nPreserved introduction.'};
+  const requests = [];
+  const result = await planWiki({identity, source: {}, wiki, complete: async ({messages}) => {
+    requests.push(messages);
+    return {content: requests.length === 1 ? JSON.stringify({pages: [{path: 'Home.md', reason: 'Deployment'}]}) :
+      requests.length === 2 ? JSON.stringify(page) + '\n' + JSON.stringify(page) : JSON.stringify(page)};
+  }});
+  assert.deepEqual(result.updates, [page]);
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[1][1], requests[2][1]);
+  let calls = 0;
+  await assert.rejects(planWiki({identity, source: {}, wiki, complete: async () => {calls++; return {content: '{malformed'};}}), /invalid JSON twice/);
+  assert.equal(calls, 2);
+});
