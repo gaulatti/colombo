@@ -2,6 +2,7 @@ name: Backend CI
 run-name: >-
   ${{ github.event_name == 'pull_request' && format('Verify PR #{0}', github.event.pull_request.number) ||
       inputs.check_provider && 'Verify AI provider' ||
+      inputs.check_author && 'Verify repair author' ||
       format('PR intent review ({0})', github.event.pull_request.number || github.event.issue.number || inputs.pull_request || github.ref_name) }}
 
 on:
@@ -20,6 +21,11 @@ on:
         description: 'PR number to reassess; leave empty to run tests on this ref'
         required: false
         type: string
+      check_author:
+        description: 'Only inspect the existing deployment token identity and repository access; never deploy or write'
+        required: false
+        default: false
+        type: boolean
       check_provider:
         description: 'Only check the provider and live review scenarios; never approve or merge'
         required: false
@@ -38,7 +44,7 @@ jobs:
     # Step and service guards keep those events from running contributor code.
     name: >-
       ${{ (github.event_name == 'pull_request' ||
-          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) && 'verify' || 'metadata-only' }}
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider && !inputs.check_author)) && 'verify' || 'metadata-only' }}
     env:
       RUST_TEST_THREADS: 4
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -52,7 +58,7 @@ jobs:
       postgres:
         image: >-
           ${{ (github.event_name == 'pull_request' ||
-              (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) && 'postgres:17-alpine' || '' }}
+              (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider && !inputs.check_author)) && 'postgres:17-alpine' || '' }}
         env:
           POSTGRES_USER: colombo
           POSTGRES_PASSWORD: colombo
@@ -66,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
         if: &verify-code >-
           github.event_name == 'pull_request' ||
-          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider && !inputs.check_author)
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
@@ -141,7 +147,7 @@ jobs:
       - name: Retain coverage evidence
         if: >-
           always() && (github.event_name == 'pull_request' ||
-          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) &&
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider && !inputs.check_author)) &&
           steps.coverage.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
@@ -229,7 +235,7 @@ jobs:
   request-reassessment:
     if: >-
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/approve-intent ')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && !inputs.check_provider)
+      (github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && !inputs.check_provider && !inputs.check_author)
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -261,3 +267,25 @@ jobs:
         with:
           operation: evaluate-review
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  check-author:
+    if: github.event_name == 'workflow_dispatch' && inputs.check_author
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Inspect existing GitHub author identity and permissions without writes
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.DEPLOYMENT_TOKEN }}
+          script: |
+            const user = await github.rest.users.getAuthenticated();
+            const scopes = (user.headers['x-oauth-scopes'] || '').split(',').map(value => value.trim());
+            const results = [];
+            for (const repository of [context.repo, {owner: 'gaulatti', repo: 'clouseau'}]) {
+              const {data} = await github.rest.repos.get(repository);
+              results.push({repository: data.full_name, owner_can_push: data.permissions?.push === true,
+                classic_repository_write_scope: scopes.includes('repo') || (!data.private && scopes.includes('public_repo'))});
+            }
+            core.info(JSON.stringify({login: user.data.login, type: user.data.type, scopes, repositories: results}));
+            if (user.data.type !== 'User' || user.data.login === 'github-actions[bot]') throw new Error('An author identity independent of the approval bot is required');
