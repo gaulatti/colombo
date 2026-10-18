@@ -26,6 +26,7 @@ impl CmsClient {
     pub fn new(metrics: Arc<Metrics>) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
             metrics,
@@ -267,6 +268,67 @@ mod tests {
             assert!(text.contains(&format!(
                 "operation=\"validation_upload\",result=\"{result}\""
             )));
+        }
+    }
+
+    #[tokio::test]
+    async fn cms_redirects_cannot_forward_credentials_or_turn_failures_into_success() {
+        use axum::{Router, http::StatusCode, routing::any};
+
+        let metrics = Metrics::new("cms-redirects").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        for status in [307, 308, 301, 302, 303] {
+            let destination = Mock::new(vec![(200, validation(&session("http://unused")))]).await;
+            let location = destination.url.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let redirect = Router::new().fallback(any(move || {
+                let location = location.clone();
+                async move {
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [("location", location)],
+                    )
+                }
+            }));
+            let server =
+                tokio::spawn(async move { axum::serve(listener, redirect).await.unwrap() });
+            let mut session = session(&endpoint);
+            session.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
+
+            let validation = client
+                .validate(&session.tenant, "fictional-password", "validation_upload")
+                .await;
+            let sequence = client.next_sequence(&session).await;
+            let callback = client
+                .photo_callback(&session, "s3://uploads/key", "original.jpg", "target.jpg")
+                .await;
+
+            assert!(
+                destination.requests().is_empty(),
+                "CMS redirect {status} sent credential-bearing requests to a different endpoint"
+            );
+            assert!(matches!(validation, Err(ValidationError::Unavailable(_))));
+            assert!(sequence.is_err());
+            assert!(callback.is_err());
+            server.abort();
+        }
+        let text = String::from_utf8(metrics.encode().unwrap()).unwrap();
+        for (operation, result) in [
+            ("validation_upload", "unavailable"),
+            ("sequence", "error"),
+            ("photo_callback", "error"),
+        ] {
+            assert!(text.lines().any(|line| line == format!(
+                "colombo_dependency_request_duration_seconds_count{{dependency=\"cms\",operation=\"{operation}\",result=\"{result}\"}} 5"
+            )));
+            assert_eq!(
+                metrics
+                    .dependency_duration
+                    .with_label_values(&["cms", operation, "success"])
+                    .get_sample_count(),
+                0
+            );
         }
     }
 

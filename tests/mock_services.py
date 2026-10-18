@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 STATE = {
     "callback_attempts": [],
     "callbacks": [],
+    "redirect_requests": 0,
     "hold_s3": False,
     "s3_failures": 0,
     "s3_requests": [],
@@ -46,7 +47,17 @@ class Handler(BaseHTTPRequestHandler):
                         STATE[key] = body[key]
                 STATE_CHANGED.notify_all()
             return self._json(200, {"status": "updated"})
+        if self.path == "/redirected-validation":
+            with STATE_CHANGED:
+                STATE["redirect_requests"] += 1
+            return self._json(401, {})
         if self.path == "/validate":
+            if body.get("key") == "redirect":
+                self.send_response(307)
+                self.send_header("Location", "http://mocks:18080/redirected-validation")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if self.headers.get("X-Colombo-API-Key") != "tenant-api-key" or body.get(
                 "key"
             ) not in ("secret", "naming", "other-assignment"):

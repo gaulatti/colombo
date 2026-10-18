@@ -82,6 +82,19 @@ test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/private)"
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: unknown' -H 'X-Colombo-Password: secret' -F file=@README.md http://127.0.0.1:18081/upload)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' -F file=@README.md http://127.0.0.1:18081/upload)" = 401
 
+# A CMS redirect is an unavailable dependency, never another credential destination.
+test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+  -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: redirect' \
+  -F file=@README.md http://127.0.0.1:18081/upload)" = 401
+state="$(mock_state)"
+STATE_JSON="$state" python3 -c 'import json,os; value=json.loads(os.environ["STATE_JSON"]); assert value["redirect_requests"] == 0; assert value["s3_requests"] == []; assert value["callbacks"] == []'
+docker compose -f "$repo_dir/compose.yaml" exec -T colombo sh -c \
+  'test -z "$(find /var/lib/colombo/spool/operations -name record.json -print -quit)"'
+curl -fsS -H 'Authorization: Bearer local-metrics-token' \
+  http://127.0.0.1:18081/actuator/prometheus > "$cert_dir/redirect-metrics.txt"
+grep -q 'colombo_dependency_request_duration_seconds_count{dependency="cms",operation="validation_upload",result="unavailable"} 1' "$cert_dir/redirect-metrics.txt"
+grep -q 'colombo_authentication_attempts_total{result="unavailable",source="http_upload"} 1' "$cert_dir/redirect-metrics.txt"
+
 # Rejection must preserve the error status and leave no accepted or temporary bytes.
 # The second case overflows while discarding a trailing field after a valid file.
 truncate -s 104857601 "$cert_dir/oversized.jpg"
