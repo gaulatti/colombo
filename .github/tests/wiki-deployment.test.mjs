@@ -181,15 +181,17 @@ test('live wiki diagnostic uses the production non-thinking transport while reta
   globalThis.fetch = async (_, options) => {
     const body = JSON.parse(options.body); requests.push(body);
     const evidence = JSON.parse(body.messages[1].content);
-    const supported = evidence.proposed_update[0].content.includes('Temporary upstream unavailability returns 502');
-    const verdict = {pages: Object.fromEntries(evidence.proposed_update.map(page => [page.path, {source_id: Object.keys(evidence.source_evidence)[0], findings: supported ? '' : 'The production match maps Unavailable to 502.', supported}]))};
+    const text = evidence.proposed_update[0].content;
+    const supported = text.includes('Temporary upstream unavailability returns 502') || text.includes('Both HTTP and FTP');
+    const verdict = {pages: Object.fromEntries(evidence.proposed_update.map(page => [page.path, {source_id: Object.keys(evidence.source_evidence)[0], findings: supported ? '' : 'The document contradicts the provided implementation.', supported}]))};
     return {ok: true, json: async () => ({choices: [{finish_reason: 'tool_calls', message: {tool_calls: [{type: 'function', function: {name: 'wiki_result', arguments: JSON.stringify(verdict)}}]}}]})};
   };
   try {await evaluateWiki();}
   finally {globalThis.fetch = original;}
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
   for (const body of requests) {
     assert.deepEqual(body.thinking, {type: 'disabled'});
+    assert.equal(body.model, 'deepseek-v4-pro');
     assert.equal(body.tools[0].function.strict, true);
     assert.deepEqual(body.tools[0].function.parameters.required, ['pages']);
     assert.deepEqual(body.tool_choice, {type: 'function', function: {name: 'wiki_result'}});
@@ -268,6 +270,7 @@ test('production wiki transport enforces separate native schemas for plan, reque
     const bundle = await planWiki({identity, source: {'README.md': 'The spool is persistent.'}, wiki: {'Home.md': '# Home'}});
     assert.match(bundle.updates[0].content, /spool is persistent/);
   } finally {globalThis.fetch = original;}
+  assert.deepEqual(requests.map(body => body.model), ['deepseek-flash', 'deepseek-flash', 'deepseek-v4-pro']);
   assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['pages']]);
   assert.ok(requests.every(body => body.tools[0].function.strict === true && body.tools[0].function.parameters.additionalProperties === false));
   assert.deepEqual(requests[1].tools[0].function.parameters.properties.path.enum, ['Home.md']);

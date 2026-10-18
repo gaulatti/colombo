@@ -241,3 +241,8 @@ The factual report is a fixed checklist for the planned pages: one exact source
 reference, bounded unresolved findings, and a verdict for each page. Every page
 must pass, with no contradictions between its findings and verdict. Correction
 regenerates only flagged pages and preserves the other page bytes exactly.
+
+Planning and writing use DeepSeek Flash. The independent factual reviewer uses
+DeepSeek V4 Pro with the same configured provider key; no new secret is required.
+The live diagnostic exercises the actual factual reviewer on both correct and
+deliberately false documentation before validation-only draft generation.
