@@ -159,12 +159,14 @@ criteria. The repair job requires a matching head repository before loading its
 author credential, and the writer independently rejects forks.
 
 Each repository keeps its [review contract](.github/clouseau.md) and
-[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/cceb9e34556de505673c37a12ff0789ada47eee6/policy/change-acceptance.md)
-live in Clouseau. Private bastille access is unnecessary. Production currently
-uses DeepSeek atomic grading; the read-only `check_provider` diagnostic compares
-it with Jev plus explicit DeepSeek escalation on six fixed executed fixtures,
-retaining decisions, usage, and whole-review cost. This qualification is separate
-from a real PR merge. Provider truncation retries at most three times with
+[configuration](.github/clouseau.json); [shared rules](https://github.com/gaulatti/clouseau/blob/b60ac157aaf4989e984e9f0694374212babb2c60/policy/change-acceptance.md)
+live in Clouseau. Private bastille access is unnecessary. Jev grades repository
+domain fit, unnecessary abstraction, and excess authority. DeepSeek grades the
+remaining factors and unresolved Jev answers in one batch per investigation;
+settled Jev answers are retained. The read-only `check_provider` diagnostic
+qualifies this combined route on six fixed executed fixtures and retains
+decisions, usage, and whole-review cost. This qualification is separate from a
+real PR merge. Provider truncation retries at most three times with
 identical evidence and 8,192/16,384/32,768 output-token limits; completed negative
 or malformed answers are never resampled for approval. See the
 [CI operations guide](https://github.com/gaulatti/colombo/wiki/CI-and-Approval).

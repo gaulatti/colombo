@@ -15,7 +15,7 @@ const head = 'a'.repeat(40);
 test('the consumer selects the scored protocol with explicit independent roles and a fixed repair budget', () => {
   assert.equal(config.version, 2);
   assert.deepEqual(config.acceptance, {
-    examiner: 'deepseek-flash', challenger: 'deepseek-v4-pro', grader: 'deepseek',
+    examiner: 'deepseek-flash', challenger: 'deepseek-v4-pro', grader: 'routed',
     grading_model: 'deepseek-flash', repair_attempts: 2,
   });
   const contract = readFileSync(new URL('../clouseau.md', import.meta.url), 'utf8');
