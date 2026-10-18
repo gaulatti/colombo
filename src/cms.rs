@@ -95,42 +95,40 @@ impl CmsClient {
             .context("sequence endpoint missing")?;
         let endpoint = url::Url::parse(&session.tenant.validation_endpoint)?.join(endpoint)?;
         let start = Instant::now();
-        let response = self
-            .client
-            .post(endpoint)
-            .header("X-Colombo-API-Key", &session.tenant.api_key)
-            .json(&serde_json::json!({"assignment_id": session.assignment_id}))
-            .send()
-            .await?;
-        let status = response.status();
-        self.metrics
-            .dependency_duration
-            .with_label_values(&[
-                "cms",
-                "sequence",
-                if status.is_success() {
-                    "success"
-                } else {
-                    "error"
-                },
-            ])
-            .observe(start.elapsed().as_secs_f64());
-        if !status.is_success() {
-            bail!("CMS sequence returned {status}");
+        let result = async {
+            let response = self
+                .client
+                .post(endpoint)
+                .header("X-Colombo-API-Key", &session.tenant.api_key)
+                .json(&serde_json::json!({"assignment_id": session.assignment_id}))
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                bail!("CMS sequence returned {status}");
+            }
+            #[derive(Deserialize)]
+            struct Body {
+                sequence: serde_json::Value,
+            }
+            let raw = response.json::<Body>().await?.sequence;
+            let sequence = raw
+                .as_u64()
+                .or_else(|| raw.as_str().and_then(|v| v.parse().ok()))
+                .context("CMS sequence response is invalid")?;
+            if sequence < 1 {
+                bail!("CMS sequence response is invalid");
+            }
+            Ok(sequence)
         }
-        #[derive(Deserialize)]
-        struct Body {
-            sequence: serde_json::Value,
-        }
-        let raw = response.json::<Body>().await?.sequence;
-        let sequence = raw
-            .as_u64()
-            .or_else(|| raw.as_str().and_then(|v| v.parse().ok()))
-            .context("CMS sequence response is invalid")?;
-        if sequence < 1 {
-            bail!("CMS sequence response is invalid");
-        }
-        Ok(sequence)
+        .await;
+        self.observe(
+            "cms",
+            "sequence",
+            if result.is_ok() { "success" } else { "error" },
+            start,
+        );
+        result
     }
 
     pub async fn photo_callback(
@@ -274,7 +272,6 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_requires_context_positive_number_and_successful_reply() {
-        let client = CmsClient::new(Metrics::new("test").unwrap()).unwrap();
         for (status, body, expected) in [
             (200, r#"{"sequence":7}"#, Some(7)),
             (200, r#"{"sequence":"9"}"#, Some(9)),
@@ -284,6 +281,8 @@ mod tests {
             (200, "not json", None),
             (403, "{}", None),
         ] {
+            let metrics = Metrics::new("sequence-reply").unwrap();
+            let client = CmsClient::new(metrics.clone()).unwrap();
             let server = Mock::new(vec![(status, body.into())]).await;
             let mut s = session(&server.url);
             s.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
@@ -293,6 +292,19 @@ mod tests {
             } else {
                 assert!(result.is_err());
             }
+            for (outcome, count) in [
+                ("success", u64::from(expected.is_some())),
+                ("error", u64::from(expected.is_none())),
+            ] {
+                assert_eq!(
+                    metrics
+                        .dependency_duration
+                        .with_label_values(&["cms", "sequence", outcome])
+                        .get_sample_count(),
+                    count,
+                    "status={status}, body={body}, outcome={outcome}"
+                );
+            }
             let request = &server.requests()[0];
             assert_eq!(request.uri, "/sequence");
             assert_eq!(
@@ -300,6 +312,7 @@ mod tests {
                 serde_json::json!({"assignment_id":"assignment-123"})
             );
         }
+        let client = CmsClient::new(Metrics::new("test").unwrap()).unwrap();
         let mut s = session("invalid://url");
         assert!(client.next_sequence(&s).await.is_err());
         s.upload.as_mut().unwrap().sequence_endpoint = Some("http://[".into());
@@ -310,6 +323,73 @@ mod tests {
         assert!(client.next_sequence(&s).await.is_err());
         s.upload = None;
         assert!(client.next_sequence(&s).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sequence_body_disconnects_are_counted_as_errors_not_successes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            stream.read_exact(&mut body).await.unwrap();
+            stream.get_mut().write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"sequence\":"
+            ).await.unwrap();
+            stream.get_mut().shutdown().await.unwrap();
+        });
+        let metrics = Metrics::new("sequence-body").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        let mut session = session(&endpoint);
+        session.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
+        assert!(client.next_sequence(&session).await.is_err());
+        server.await.unwrap();
+        assert_eq!(
+            metrics
+                .dependency_duration
+                .with_label_values(&["cms", "sequence", "error"])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .dependency_duration
+                .with_label_values(&["cms", "sequence", "success"])
+                .get_sample_count(),
+            0
+        );
+        let text = String::from_utf8(metrics.encode().unwrap()).unwrap();
+        assert!(text.lines().any(|line| line == "colombo_dependency_request_duration_seconds_count{dependency=\"cms\",operation=\"sequence\",result=\"error\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn sequence_transport_failures_are_counted_in_dependency_metrics() {
+        let metrics = Metrics::new("sequence-transport").unwrap();
+        let client = CmsClient::new(metrics.clone()).unwrap();
+        let mut session = session("http://127.0.0.1:0");
+        session.upload.as_mut().unwrap().sequence_endpoint = Some("/sequence".into());
+        assert!(client.next_sequence(&session).await.is_err());
+        assert_eq!(
+            metrics
+                .dependency_duration
+                .with_label_values(&["cms", "sequence", "error"])
+                .get_sample_count(),
+            1
+        );
     }
 
     #[tokio::test]
