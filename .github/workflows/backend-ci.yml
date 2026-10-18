@@ -95,7 +95,7 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
         if: *verify-code
-        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: test
       - name: Check out pinned reviewer for consumer integration tests
@@ -103,7 +103,7 @@ jobs:
         if: *verify-code
         with:
           repository: gaulatti/clouseau
-          ref: c9068a445436092951a051fabb91c841c267f3fd
+          ref: bfc759d21e96a0eadcd925adf628367b42f9c0b4
           path: .clouseau-ci
           persist-credentials: false
       - name: Test workflow routing
@@ -130,7 +130,7 @@ jobs:
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
         if: *verify-code
-        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: coverage
           coverage-report: coverage.json
@@ -172,12 +172,20 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+      - uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         id: assess
         with:
           operation: assess
           wait-for-verification: 'true'
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          typesafe-key: ${{ secrets.TYPESAFE_API_KEY }}
+      - name: Retain acceptance record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/clouseau-acceptance*.json
+          if-no-files-found: ignore
 
   approve-and-merge:
     name: ${{ github.event_name == 'pull_request_target' && !github.event.pull_request.draft && 'approve-and-merge' || 'metadata-only-approval' }}
@@ -206,12 +214,52 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+      - name: Load this run's acceptance record
+        if: >-
+          github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+          needs.assess-intent.result == 'success' &&
+          fromJSON(needs.assess-intent.outputs.assessment).record_digest != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work
       - if: *approve-code
-        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+        uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: gate
           native-gate: 'true'
           assessment: ${{ needs.assess-intent.outputs.assessment }}
+
+  apply-repair:
+    needs: [assess-intent, approve-and-merge]
+    if: >-
+      always() && github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+      needs.assess-intent.result == 'success' && needs.approve-and-merge.result == 'failure' &&
+      fromJSON(needs.assess-intent.outputs.assessment).repair_digest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+    concurrency:
+      group: pr-approval-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work
+      - uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
+        with:
+          operation: repair
+          assessment: ${{ needs.assess-intent.outputs.assessment }}
+          repair-token: ${{ secrets.DEPLOYMENT_TOKEN }}
 
   finalize-merge:
     needs: [assess-intent, approve-and-merge]
@@ -227,7 +275,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+      - uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: finalize
           assessment: ${{ needs.assess-intent.outputs.assessment }}
@@ -247,7 +295,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+      - uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: request-reassessment
           pull-request: ${{ inputs.pull_request }}
@@ -255,18 +303,26 @@ jobs:
   check-provider:
     if: github.event_name == 'workflow_dispatch' && inputs.check_provider
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 30
     permissions: {}
     steps:
-      - uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+      - uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
           operation: check-provider
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
-      - name: Evaluate repository fit and test integrity with the live model
-        uses: gaulatti/clouseau@c9068a445436092951a051fabb91c841c267f3fd
+      - name: Qualify acceptance decisions and compare provider cost
+        uses: gaulatti/clouseau@bfc759d21e96a0eadcd925adf628367b42f9c0b4
         with:
-          operation: evaluate-review
+          operation: evaluate-acceptance
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
+          typesafe-key: ${{ secrets.TYPESAFE_API_KEY }}
+      - name: Retain qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/acceptance-evaluation.json
+          if-no-files-found: ignore
 
   check-author:
     if: github.event_name == 'workflow_dispatch' && inputs.check_author
@@ -276,14 +332,16 @@ jobs:
     steps:
       - name: Inspect existing GitHub author identity and permissions without writes
         uses: actions/github-script@v7
+        env:
+          COLOMBO_AUTHOR_TOKEN: ${{ secrets.DEPLOYMENT_TOKEN }}
         with:
-          github-token: ${{ secrets.DEPLOYMENT_TOKEN }}
           script: |
-            const user = await github.rest.users.getAuthenticated();
+            const authorGithub = new github.constructor({auth: process.env.COLOMBO_AUTHOR_TOKEN});
+            const user = await authorGithub.rest.users.getAuthenticated();
             const scopes = (user.headers['x-oauth-scopes'] || '').split(',').map(value => value.trim());
             const results = [];
             for (const repository of [context.repo, {owner: 'gaulatti', repo: 'clouseau'}]) {
-              const {data} = await github.rest.repos.get(repository);
+              const {data} = await authorGithub.rest.repos.get(repository);
               results.push({repository: data.full_name, owner_can_push: data.permissions?.push === true,
                 classic_repository_write_scope: scopes.includes('repo') || (!data.private && scopes.includes('public_repo'))});
             }

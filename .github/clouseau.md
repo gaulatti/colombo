@@ -30,7 +30,16 @@ swallowed failures, test-only success paths, coverage exclusions, and mocks that
 replace the behavior being claimed. Ordinary mocks at external CMS/S3 boundaries
 are legitimate when request contracts and failure handling remain exercised.
 Detected test fakery blocks approval and cannot be waived by intent confirmation.
-Uncertain integrity requires a second opinion with the missing evidence explained.
+Missing verification or unresolved integrity holds the PR for bounded automated
+investigation; it does not invent fakery or delegate ordinary code review to the
+owner. Human input is for purpose, authority, or a real outcome tradeoff.
+
+Every material capability and mechanism must earn fit, need, and proportionality
+of at least 80 under Clouseau's shared protocol. Supporting tests inherit the
+accepted production obligation when their assertions establish that behavior.
+Each causal technical finding is scored separately; a score of at least 70
+blocks. A good feature cannot average away an unrelated capability or a defect.
+Required integrity and review-completeness gates remain independent of scores.
 
 Clouseau owns the shared assessment, technical gate, owner handoff,
 revision-bound confirmation, approval, and auto-merge rules. The pinned action

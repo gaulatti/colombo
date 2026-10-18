@@ -7,11 +7,11 @@ import {evaluate, allowed} from './workflow-expressions.mjs';
 const workflow = parse(readFileSync(new URL('../workflows/backend-ci.yml', import.meta.url), 'utf8'));
 const config = JSON.parse(readFileSync(new URL('../clouseau.json', import.meta.url), 'utf8'));
 
-function context(event, {draft = false, pullRequest = '', provider = false, assessment = 'success'} = {}) {
+function context(event, {draft = false, pullRequest = '', provider = false, author = false, assessment = 'success', record = true, repair = false, gate = 'success'} = {}) {
   return {
     github: {event_name: event, event: {pull_request: {number: 14, draft}}, run_id: 1000},
-    inputs: {pull_request: pullRequest, check_provider: provider},
-    needs: {'assess-intent': {result: assessment}},
+    inputs: {pull_request: pullRequest, check_provider: provider, check_author: author},
+    needs: {'assess-intent': {result: assessment, outputs: {assessment: JSON.stringify({record_digest: record ? 'a'.repeat(64) : '', repair_digest: repair ? 'b'.repeat(64) : ''})}}, 'approve-and-merge': {result: gate}},
     steps: {coverage: {outcome: 'success'}},
   };
 }
@@ -25,6 +25,7 @@ const cases = [
   ['manual tests', context('workflow_dispatch'), true, false],
   ['manual reassessment', context('workflow_dispatch', {pullRequest: '14'}), false, false],
   ['provider diagnostic', context('workflow_dispatch', {provider: true}), false, false],
+  ['author diagnostic', context('workflow_dispatch', {author: true}), false, false],
 ];
 
 function assertRoute(w, label, c, verify, approve) {
@@ -80,6 +81,51 @@ test('trusted checkout, provider separation, and required evidence steps are pre
   for (const name of config.verification.steps) {
     assert.ok(workflow.jobs.verify.steps.some(step => step.name === name), `required step ${name}`);
   }
+});
+
+test('approval downloads only a complete record from its own run and attempt', () => {
+  const assess = workflow.jobs['assess-intent'];
+  const upload = assess.steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+  const download = workflow.jobs['approve-and-merge'].steps.find(step => step.uses?.startsWith('actions/download-artifact@'));
+  assert.equal(assess.permissions.contents, 'read');
+  assert.equal(assess.permissions['pull-requests'], 'read');
+  assert.equal(assess.permissions.issues, 'read');
+  assert.equal(upload.with.name, 'clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.equal(download.with.name, upload.with.name);
+  assert.equal(download.with.path, 'work');
+  assert.ok(allowed(download.if, context('pull_request_target')));
+  assert.equal(allowed(download.if, context('pull_request_target', {record: false})), false);
+  assert.equal(allowed(download.if, context('pull_request_target', {assessment: 'failure'})), false);
+  assert.equal(allowed(download.if, context('pull_request')), false);
+});
+
+test('bounded repair runs only after a failed gate with a concrete proposal on a ready PR', () => {
+  const job = workflow.jobs['apply-repair'];
+  const valid = context('pull_request_target', {repair: true, gate: 'failure'});
+  assert.ok(allowed(job.if, valid, {success: false}));
+  for (const c of [
+    context('pull_request_target', {repair: false, gate: 'failure'}),
+    context('pull_request_target', {repair: true, gate: 'success'}),
+    context('pull_request_target', {repair: true, gate: 'failure', assessment: 'failure'}),
+    context('pull_request_target', {repair: true, gate: 'failure', draft: true}),
+    context('pull_request', {repair: true, gate: 'failure'}),
+    context('issue_comment', {repair: true, gate: 'failure'}),
+    context('workflow_dispatch', {repair: true, gate: 'failure'}),
+  ]) assert.equal(allowed(job.if, c, {success: false}), false);
+  assert.equal(job.concurrency.group, workflow.jobs['approve-and-merge'].concurrency.group.replace(
+    "github.event_name == 'pull_request_target' && github.event.pull_request.number || github.run_id", 'github.event.pull_request.number'));
+  const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, 'main');
+  assert.equal(checkout.with['persist-credentials'], false);
+  assert.equal(job.permissions.contents, 'read');
+  const writer = job.steps.find(step => step.with?.operation === 'repair');
+  assert.equal(writer.with['repair-token'], '${{ secrets.DEPLOYMENT_TOKEN }}');
+  for (const [name, other] of Object.entries(workflow.jobs)) {
+    if (['apply-repair', 'check-author'].includes(name)) continue;
+    assert.ok(!JSON.stringify(other).includes('secrets.DEPLOYMENT_TOKEN'), `${name}: no author token`);
+  }
+  assert.ok(!JSON.stringify(job).includes('provider-key'));
+  assert.ok(!JSON.stringify(job).includes('secrets.DEEPSEEK_API_KEY'));
 });
 
 test('the routing checks reject missing guards and a skipped assessment-failure path', () => {
