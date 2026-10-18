@@ -272,3 +272,15 @@ test('production wiki transport enforces separate native schemas for plan, reque
   assert.ok(requests.every(body => body.text.format.type === 'json_schema' && body.text.format.schema.additionalProperties === false));
   assert.deepEqual(requests[1].text.format.schema.properties.path.enum, ['Home.md']);
 });
+
+test('rejected wiki planning values remain inspectable and cannot reach generation or publication', async () => {
+  const plan = {pages: [{path: '../outside.md', reason: 'Unsafe location'}]};
+  const diagnostics = [];
+  let calls = 0;
+  await assert.rejects(planWiki({identity, source: {}, wiki: {'Home.md': '# Home'}, diagnostic: value => diagnostics.push(value), complete: async () => {
+    calls++; return {content: JSON.stringify(plan)};
+  }}), /Invalid wiki planned page/);
+  assert.equal(calls, 1);
+  assert.equal(diagnostics[0].stage, 'planning');
+  assert.deepEqual(diagnostics[0].plan, plan);
+});
