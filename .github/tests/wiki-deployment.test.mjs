@@ -11,7 +11,7 @@ const ci = parse(readFileSync(new URL('../workflows/backend-ci.yml', import.meta
 const config = JSON.parse(readFileSync(new URL('../clouseau-wiki.json', import.meta.url), 'utf8'));
 const require = createRequire(import.meta.url);
 const shared = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
-const {planWiki, validateBundle, validateConfig} = require(`${shared}/wiki.cjs`);
+const {planWiki, validateBundle, validateConfig, evaluateWiki} = require(`${shared}/wiki.cjs`);
 const {publishWiki} = require(`${shared}/wiki-git.cjs`);
 const facts = (pages, source) => ({supported: true, findings: [], evidence: pages.map(page => ({page: page.path, source_path: Object.keys(source)[0], quote: Object.values(source)[0]}))});
 const identity = {repository: 'example/upload-gateway', source_sha: 'a'.repeat(40), wiki_base_sha: 'b'.repeat(40), deployment_run_id: 123};
@@ -81,6 +81,10 @@ test('provider and publication authority are isolated and preflight cannot write
   assert.equal(access.run, 'git push --dry-run origin HEAD:refs/heads/master');
   assert.equal(workflow.jobs['wiki-plan'].steps[1].with['persist-credentials'], false);
   const generate = workflow.jobs['wiki-plan'].steps.find(step => step.with?.operation === 'plan-wiki');
+  const diagnostic = workflow.jobs['wiki-plan'].steps.find(step => step.with?.operation === 'evaluate-wiki');
+  assert.equal(diagnostic.if, 'inputs.validate_wiki_only');
+  assert.ok(workflow.jobs['wiki-plan'].steps.indexOf(diagnostic) < workflow.jobs['wiki-plan'].steps.indexOf(generate));
+  assert.equal(diagnostic.with['provider-key'], '${{ secrets.DEEPSEEK_API_KEY }}');
   assert.equal(generate.with['wiki-draft'], "${{ inputs.validate_wiki_only && 'true' || 'false' }}");
 });
 
@@ -164,5 +168,28 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
     await assert.rejects(planWiki({identity, source, wiki, complete: async () => ({content: JSON.stringify(++calls === 1 ?
       {pages: [{path: page.path, reason: 'Authentication contract'}]} : calls === 2 ? page : review)})}));
     assert.equal(calls, 3, 'a substantive factual rejection is final, never retried until favorable');
+  }
+});
+
+
+test('live wiki diagnostic uses the production non-thinking transport while retaining substantive negative review', async () => {
+  const original = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (_, options) => {
+    const body = JSON.parse(options.body); requests.push(body);
+    const evidence = JSON.parse(body.messages[1].content);
+    const supported = evidence.proposed_update[0].content.includes('Temporary upstream unavailability returns 502');
+    const verdict = supported ? facts(evidence.proposed_update, evidence.source) :
+      {supported: false, findings: ['The production match maps Unavailable to 502.'], evidence: []};
+    return {ok: true, json: async () => ({choices: [{finish_reason: 'stop', message: {content: JSON.stringify(verdict)}}]})};
+  };
+  try {await evaluateWiki();}
+  finally {globalThis.fetch = original;}
+  assert.equal(requests.length, 2);
+  for (const body of requests) {
+    assert.deepEqual(body.thinking, {type: 'disabled'});
+    assert.equal(body.reasoning_effort, undefined);
+    assert.deepEqual(body.response_format, {type: 'json_object'});
+    assert.equal(body.tools, undefined);
   }
 });

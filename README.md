@@ -172,8 +172,15 @@ A documentation failure leaves the completed deployment intact and makes the
 workflow visibly fail; it does not roll back or claim external service health.
 
 For a safe preflight, manually run `Backend Deploy` with `validate_wiki_only: true`.
-It generates a real DeepSeek draft artifact and checks wiki Git write access with
+It verifies the live factual gate against supported and deliberately false
+authentication claims, generates a real DeepSeek draft artifact, and checks wiki
+Git write access with
 `git push --dry-run`; it skips image builds, deployment, and wiki publication.
 Normal post-deployment runs use the built-in GitHub token for wiki publication and
 `DEEPSEEK_API_KEY` only in the read-only generation job. No additional wiki secret
 is required when the repository token has wiki write access.
+
+Wiki calls use DeepSeek Flash in non-thinking JSON mode so their bounded response
+budget is available for the documentation and source citations. PR assessment
+keeps its existing reasoning mode. The independent factual gate still applies to
+every proposed wiki update before publication.
