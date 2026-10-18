@@ -13,7 +13,7 @@ The previous Java implementation is preserved on the `archive/v1-java` branch.
 3. Receive an assignment ID and short-lived S3 credentials.
 4. Hash and fsync the file and private operation context into an atomic durable spool entry.
 5. Return FTP `226` or HTTP `202` only after that entry is recoverable after a restart.
-6. Upload to a stable S3 key and persist delivery before independently retrying the CMS callback.
+6. Upload to a stable S3 key and persist delivery before independently retrying the CMS callback. The complete key (CMS prefix, joining slash, and resolved filename) must fit [S3's 1,024 UTF-8 byte limit](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html), including keys recovered from the spool. Exact-limit keys still deliver; oversized keys become terminal `failed` receipts with `invalid_metadata` before any S3 request or CMS callback.
 
 Eight fixed workers recover accepted or in-flight entries at startup. Per-operation file locks prevent concurrent processes from executing the same entry. S3 and callback attempts each have a five-attempt retry budget; the persisted S3 key and callback payload remain stable across attempts. Each FTP connection still has isolated session credentials, including when one username is connected concurrently.
 
@@ -66,14 +66,6 @@ curl http://localhost:8080/uploads/OPERATION_ID \
 
 Receipt states are `accepted`, `uploading`, `delivered`, `callback-confirmed`, `failed`, and `expired`. Receipts include the assignment, protocol, byte count, SHA-256 checksum, timestamps, and bounded attempt/failure fields; they never include local paths, credentials, bucket names, object keys, or raw errors. Unknown or tenant/assignment-mismatched IDs return `404`, bad credentials return `401`, and retained expired receipts return `410`.
 
-The complete S3 object key (CMS prefix, joining slash, and resolved filename)
-must fit [S3's 1,024 UTF-8 byte limit](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html).
-An exact-limit key is valid. Oversized keys, including keys recovered from the
-spool, become terminal `failed` receipts with `invalid_metadata` before any S3
-request or CMS callback. The accepted bytes are quarantined under the existing
-failed-operation retention policy. The bounded `invalid_metadata` spool outcome
-records this rejection; it does not schedule S3 retries or invalidate credentials.
-
 ## Credential refresh and authentication failures
 
 The durable upload worker handles both HTTP- and FTP-accepted operations. Expired
@@ -111,6 +103,7 @@ For `colombo.gaulatti.com`, obtain and renew the certificate on the host with Le
 - A configured `COLOMBO_METRICS_TOKEN` must be at least 16 characters.
 - `COLOMBO_SPOOL_PATH` must be persistent across process, container, and host-service restarts. Compose and the deploy workflow mount the `colombo-spool` Docker volume at `/var/lib/colombo/spool`.
 - Confirmed receipts are retained for seven days; terminal failures and quarantined bytes are retained for 30 days; expired receipt tombstones remain for another 30 days. Operators may remove an expired operation directory and its matching quarantine file earlier when policy requires it, but must not edit live entries.
+- For an oversized-key `invalid_metadata` failure, shorten the CMS key prefix or resolved filename and upload the original file again. The failed operation is terminal; restarting Colombo or refreshing credentials cannot repair its persisted key. Accepted bytes follow the existing quarantine/retention policy, and the bounded `invalid_metadata` spool outcome records the rejection without scheduling S3 retries or invalidating credentials. Check the prefix and naming policy in the CMS: public receipts deliberately omit object keys.
 - The scrape preserves the bounded v1 domain families and adds durable-operation count, oldest-age, and outcome families. Labels never contain usernames, assignments, filenames, buckets, URLs, object keys, or exception text.
 - Other routes retain the v1 protected response behavior (`401`).
 - `tenants-cli` remains installed in the runtime container.
