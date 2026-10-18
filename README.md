@@ -199,7 +199,7 @@ the source-line map for inspection. Every request keeps the complete evidence
 within its explicit context limit or fails without publication.
 
 Planning, page generation, and factual review each have a native response schema
-on DeepSeek's Responses API, in addition to all local checks. PR review stays on
+using DeepSeek's beta strict return format, in addition to all local checks. No model-selected function is executed. PR review stays on
 its existing API and reasoning policy. This keeps response shape enforcement
 separate from the substantive correctness and publication decisions.
 
