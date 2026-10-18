@@ -92,6 +92,11 @@ jobs:
         uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: test
+      - name: Test workflow routing
+        if: *verify-code
+        run: |
+          npm ci --prefix .github/tests --ignore-scripts --no-audit --no-fund
+          npm test --prefix .github/tests
       - name: Rust format and lint
         if: *verify-code
         run: |
