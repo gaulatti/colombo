@@ -82,6 +82,24 @@ test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/private)"
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: unknown' -H 'X-Colombo-Password: secret' -F file=@README.md http://127.0.0.1:18081/upload)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: wrong' -F file=@README.md http://127.0.0.1:18081/upload)" = 401
 
+# Rejection must preserve the error status and leave no accepted or temporary bytes.
+# The second case overflows while discarding a trailing field after a valid file.
+truncate -s 104857601 "$cert_dir/oversized.jpg"
+for first_file in oversized.jpg README.md; do
+  if [ "$first_file" = oversized.jpg ]; then
+    parts=(-F "file=@$cert_dir/oversized.jpg")
+  else
+    parts=(-F "file=@$repo_dir/README.md" -F "metadata=@$cert_dir/oversized.jpg")
+  fi
+  test "$(curl -sS -o "$cert_dir/rejection.json" -w '%{http_code}' \
+    -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: secret' \
+    "${parts[@]}" http://127.0.0.1:18081/upload)" = 413
+  python3 -c 'import json,sys; assert json.load(sys.stdin) == {"error": "Upload exceeds the size limit"}' < "$cert_dir/rejection.json"
+  docker compose -f "$repo_dir/compose.yaml" exec -T colombo sh -c \
+    'test -z "$(find /tmp -name "colombo-upload-*" -print -quit)" && test -z "$(find /var/lib/colombo/spool/operations /var/lib/colombo/spool/staging -mindepth 1 -print -quit)"'
+done
+rm "$cert_dir/oversized.jpg"
+
 mock_control '{"hold_s3": true}'
 receipt="$(curl -fsS -X POST -H 'X-Colombo-Username: photographer' -H 'X-Colombo-Password: naming' -F file=@README.md http://127.0.0.1:18081/upload)"
 operation_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["operation_id"])' <<<"$receipt")"

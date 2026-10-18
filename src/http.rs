@@ -149,7 +149,7 @@ async fn upload(
         let field = match multipart.next_field().await {
             Ok(Some(value)) => value,
             Ok(None) => break,
-            Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid multipart request"),
+            Err(err) => return UploadReadError::multipart(err).into_response(),
         };
         if field.name() != Some("file") || accepted.is_some() {
             continue;
@@ -232,7 +232,10 @@ async fn copy_upload(
         match field.chunk().await {
             Ok(Some(chunk)) => {
                 total += chunk.len();
-                if total > limit || output.write_all(&chunk).await.is_err() {
+                if total > limit {
+                    return Err(UploadReadError::too_large());
+                }
+                if output.write_all(&chunk).await.is_err() {
                     return Err(UploadReadError {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         message: "Failed to process uploaded file",
@@ -240,12 +243,7 @@ async fn copy_upload(
                 }
             }
             Ok(None) => break,
-            Err(_) => {
-                return Err(UploadReadError {
-                    status: StatusCode::BAD_REQUEST,
-                    message: "Invalid multipart request",
-                });
-            }
+            Err(err) => return Err(UploadReadError::multipart(err)),
         }
     }
     if total == 0 {
@@ -266,6 +264,26 @@ async fn copy_upload(
 struct UploadReadError {
     status: StatusCode,
     message: &'static str,
+}
+
+impl UploadReadError {
+    fn too_large() -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: "Upload exceeds the size limit",
+        }
+    }
+
+    fn multipart(err: axum::extract::multipart::MultipartError) -> Self {
+        if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            Self::too_large()
+        } else {
+            Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Invalid multipart request",
+            }
+        }
+    }
 }
 
 fn temporary_upload(
@@ -597,7 +615,14 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                response.status(),
+                if limit == 1 {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            );
         }
         assert_eq!(
             metrics_response(Err(anyhow::anyhow!("fixture encoding failure"))).status(),
@@ -606,6 +631,44 @@ mod tests {
         let mut writer = FailingWriter { write_fails: false };
         writer.flush().await.unwrap();
         writer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_multipart_requests_are_rejected_without_durable_acceptance() {
+        use tokio::io::AsyncReadExt;
+        use tokio_util::io::ReaderStream;
+
+        // Exercise the production router's real limit with bounded streaming memory.
+        // Overflow can occur inside the file or while skipping another field,
+        // including after a complete file has already been written temporarily.
+        for prefix in [
+            "--test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large.jpg\"\r\n\r\n".to_owned(),
+            "--test\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".to_owned(),
+            FILE.replace("--test--\r\n", "--test\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n"),
+        ] {
+            let f = Fixture::new(200).await;
+            let input = std::io::Cursor::new(prefix.into_bytes())
+                .chain(tokio::io::repeat(b'x').take(MAX_UPLOAD_BYTES as u64 + 1))
+                .chain(std::io::Cursor::new(b"\r\n--test--\r\n"));
+            let response = router(f.state.clone())
+                .oneshot(
+                    axum::http::Request::post("/upload")
+                        .header("X-Colombo-Username", "photographer")
+                        .header("X-Colombo-Password", "key")
+                        .header("content-type", "multipart/form-data; boundary=test")
+                        .body(Body::from_stream(ReaderStream::new(input)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let json: serde_json::Value = serde_json::from_slice(
+                &response.into_body().collect().await.unwrap().to_bytes(),
+            ).unwrap();
+            assert_eq!(json["error"], "Upload exceeds the size limit");
+            assert!(f.spool.operation_ids().unwrap().is_empty());
+            assert!(std::fs::read_dir(f.spool.root().join("staging")).unwrap().next().is_none());
+        }
     }
 
     #[tokio::test]
