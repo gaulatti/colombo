@@ -34,7 +34,8 @@ concurrency:
 
 jobs:
   verify:
-    # Skipped metadata handlers must not publish a second check named verify.
+    # Schedule the job so GitHub resolves its name, including metadata events.
+    # Step and service guards keep those events from running contributor code.
     name: >-
       ${{ (github.event_name == 'pull_request' ||
           (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) && 'verify' || 'metadata-only' }}
@@ -43,14 +44,15 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_INCREMENTAL: 0
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
     services:
       postgres:
-        image: postgres:17-alpine
+        image: >-
+          ${{ (github.event_name == 'pull_request' ||
+              (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) && 'postgres:17-alpine' || '' }}
         env:
           POSTGRES_USER: colombo
           POSTGRES_PASSWORD: colombo
@@ -62,31 +64,46 @@ jobs:
           --health-interval 2s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        if: &verify-code >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        if: *verify-code
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: dtolnay/rust-toolchain@nightly
+        if: *verify-code
         with:
           toolchain: nightly-2026-10-01
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        if: *verify-code
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@v2
+        if: *verify-code
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
+        if: *verify-code
         uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: test
+      - name: Test workflow routing
+        if: *verify-code
+        run: |
+          npm ci --prefix .github/tests --ignore-scripts --no-audit --no-fund
+          npm test --prefix .github/tests
       - name: Rust format and lint
+        if: *verify-code
         run: |
           cargo +1.98.0 fmt --all -- --check
           cargo +1.98.0 clippy --locked --all-targets --all-features -- -D warnings
       - name: Run all targets with branch instrumentation
+        if: *verify-code
         id: coverage
         run: |
           cargo +nightly-2026-10-01 llvm-cov clean --workspace
@@ -95,22 +112,29 @@ jobs:
             --no-cfg-coverage --no-cfg-coverage-nightly \
             --json --output-path coverage.json
       - name: Run documentation tests
+        if: *verify-code
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
+        if: *verify-code
         uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: coverage
           coverage-report: coverage.json
           source-directory: src
       - name: Build verification container
+        if: *verify-code
         uses: ./.github/actions/build-container
       - name: Verify container boundary
+        if: *verify-code
         env:
           COLOMBO_TEST_IMAGE: colombo:ci
           COLOMBO_E2E_SKIP_BUILD: '1'
         run: ./tests/e2e.sh
       - name: Retain coverage evidence
-        if: always() && steps.coverage.outcome == 'success'
+        if: >-
+          always() && (github.event_name == 'pull_request' ||
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request == '' && !inputs.check_provider)) &&
+          steps.coverage.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
@@ -142,10 +166,11 @@ jobs:
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
 
   approve-and-merge:
-    name: ${{ github.event_name == 'pull_request_target' && 'approve-and-merge' || 'metadata-only-approval' }}
+    name: ${{ github.event_name == 'pull_request_target' && !github.event.pull_request.draft && 'approve-and-merge' || 'metadata-only-approval' }}
     needs: assess-intent
-    # A failed assessment must fail this required job rather than skip it.
-    if: always() && github.event_name == 'pull_request_target' && !github.event.pull_request.draft
+    # Always resolve the job name; only trusted, ready PR events run its steps.
+    # A failed assessment must still fail the required native approval check.
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -154,17 +179,21 @@ jobs:
       issues: write
       actions: write
     concurrency:
-      group: pr-approval-${{ github.event.pull_request.number }}
+      group: pr-approval-${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Require a completed assessment
-        if: needs.assess-intent.result != 'success'
+        if: >-
+          github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+          needs.assess-intent.result != 'success'
         run: exit 1
       - uses: actions/checkout@v4
+        if: &approve-code github.event_name == 'pull_request_target' && !github.event.pull_request.draft
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
+      - if: *approve-code
+        uses: gaulatti/clouseau@07c4f7373fb723bbfc9b76cbe306809eac3f4413
         with:
           operation: gate
           native-gate: 'true'

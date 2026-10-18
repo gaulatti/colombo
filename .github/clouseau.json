@@ -6,6 +6,7 @@
     "job": "verify",
     "steps": [
       "Test approval policy",
+      "Test workflow routing",
       "Rust format and lint",
       "Run all targets with branch instrumentation",
       "Run documentation tests",
