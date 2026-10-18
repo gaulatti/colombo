@@ -5,11 +5,12 @@ import {parse} from 'yaml';
 import {evaluate, allowed} from './workflow-expressions.mjs';
 
 const workflow = parse(readFileSync(new URL('../workflows/backend-ci.yml', import.meta.url), 'utf8'));
+const sharedWorkflow = parse(readFileSync(new URL('../../.clouseau-ci/.github/workflows/ci.yml', import.meta.url), 'utf8'));
 const config = JSON.parse(readFileSync(new URL('../clouseau.json', import.meta.url), 'utf8'));
 
-function context(event, {draft = false, pullRequest = '', provider = false, author = false, assessment = 'success', record = true, repair = false, gate = 'success'} = {}) {
+function context(event, {draft = false, pullRequest = '', provider = false, author = false, fork = false, assessment = 'success', record = true, repair = false, gate = 'success'} = {}) {
   return {
-    github: {event_name: event, event: {pull_request: {number: 14, draft}}, run_id: 1000},
+    github: {event_name: event, repository: 'gaulatti/colombo', event: {pull_request: {number: 14, draft, head: {repo: {full_name: fork ? 'external/contribution' : 'gaulatti/colombo'}}}}, run_id: 1000},
     inputs: {pull_request: pullRequest, check_provider: provider, check_author: author},
     needs: {'assess-intent': {result: assessment, outputs: {assessment: JSON.stringify({record_digest: record ? 'a'.repeat(64) : '', repair_digest: repair ? 'b'.repeat(64) : ''})}}, 'approve-and-merge': {result: gate}},
     steps: {coverage: {outcome: 'success'}},
@@ -108,6 +109,7 @@ test('bounded repair runs only after a failed gate with a concrete proposal on a
     context('pull_request_target', {repair: true, gate: 'success'}),
     context('pull_request_target', {repair: true, gate: 'failure', assessment: 'failure'}),
     context('pull_request_target', {repair: true, gate: 'failure', draft: true}),
+    context('pull_request_target', {repair: true, gate: 'failure', fork: true}),
     context('pull_request', {repair: true, gate: 'failure'}),
     context('issue_comment', {repair: true, gate: 'failure'}),
     context('workflow_dispatch', {repair: true, gate: 'failure'}),
@@ -126,6 +128,20 @@ test('bounded repair runs only after a failed gate with a concrete proposal on a
   }
   assert.ok(!JSON.stringify(job).includes('provider-key'));
   assert.ok(!JSON.stringify(job).includes('secrets.DEEPSEEK_API_KEY'));
+});
+
+test('consumer and pinned shared workflows stop fork repair before the author credential is loaded', () => {
+  for (const [name, w] of [['consumer', workflow], ['shared', sharedWorkflow]]) {
+    const job = w.jobs['apply-repair'];
+    const internal = context('pull_request_target', {repair: true, gate: 'failure'});
+    const fork = context('pull_request_target', {repair: true, gate: 'failure', fork: true});
+    assert.ok(allowed(job.if, internal, {success: false}), `${name}: internal repair remains eligible`);
+    assert.equal(allowed(job.if, fork, {success: false}), false, `${name}: fork cannot load the author token`);
+    const deleted = structuredClone(internal); deleted.github.event.pull_request.head.repo = null;
+    assert.equal(allowed(job.if, deleted, {success: false}), false, `${name}: missing head identity`);
+    const mutant = job.if.replace('github.event.pull_request.head.repo.full_name == github.repository &&', '');
+    assert.equal(allowed(mutant, fork, {success: false}), true, `${name}: removing the guard is detected`);
+  }
 });
 
 test('the routing checks reject missing guards and a skipped assessment-failure path', () => {
