@@ -54,7 +54,7 @@ Successful local acceptance returns:
 {"status":"accepted","assignment_id":"...","operation_id":"..."}
 ```
 
-The same operation ID is written to Colombo's structured log before an FTP upload receives `226`. The multipart request limit is 100 MiB. The FTP-only master-password support bypass is never accepted by this endpoint.
+The same operation ID is written to Colombo's structured log before an FTP upload receives `226`. The multipart request limit is 100 MiB, including multipart headers and boundaries. Oversized requests return `413` with `{"error":"Upload exceeds the size limit"}` and create no accepted operation. Malformed multipart requests return `400`; temporary storage failures return `500`. The FTP-only master-password support bypass is never accepted by this endpoint.
 
 Use the same tenant headers to read the durable receipt:
 
