@@ -45,3 +45,13 @@ Clouseau owns the shared assessment, technical gate, owner handoff,
 revision-bound confirmation, approval, and auto-merge rules. The pinned action
 and .github/clouseau.json define those operations. All tests and exactly 100%
 line and branch coverage remain mandatory for every contribution.
+
+A passing local Clouseau review may be reused only through a signed receipt from
+an enrolled trusted workstation and the matching native GitHub author. CI must
+independently verify current protected policy, exact head/base and engine content,
+expiry, evidence and deterministic scores. This route has no AI credentials and
+must not fall back to paid review when verification fails. All native tests,
+exact coverage, container checks and branch protections remain mandatory.
+Agent installation and account-authenticated local execution remain independent
+of CI enrollment and CI provider keys. A signature authenticates the workstation;
+it does not attest against compromise of that workstation or its operator.

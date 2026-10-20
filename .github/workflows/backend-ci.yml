@@ -95,7 +95,7 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
       - name: Test approval policy
         if: *verify-code
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: test
       - name: Check out pinned reviewer for consumer integration tests
@@ -103,7 +103,8 @@ jobs:
         if: *verify-code
         with:
           repository: gaulatti/clouseau
-          ref: b60ac157aaf4989e984e9f0694374212babb2c60
+          ref: 9aadd5819bad9c59928411d6011c0018b2257dc0
+          fetch-depth: 0
           path: .clouseau-ci
           persist-credentials: false
       - name: Test workflow routing
@@ -130,7 +131,7 @@ jobs:
         run: cargo +1.98.0 test --locked --doc --all-features
       - name: Enforce 100% line and branch coverage
         if: *verify-code
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: coverage
           coverage-report: coverage.json
@@ -165,14 +166,29 @@ jobs:
       pull-requests: read
       issues: read
     outputs:
-      assessment: ${{ steps.assess.outputs.assessment }}
+      assessment: ${{ steps.local-review.outputs.assessment || steps.assess.outputs.assessment }}
     steps:
       # Never load the controller or its configuration from the PR.
       - uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+      - name: Select authenticated local review or the installed CI reviewer
+        id: review-route
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.setOutput('local', String((context.payload.pull_request?.body || '').includes('clouseau-local-review:v1')));
+      - name: Verify authenticated local review without AI credentials
+        if: steps.review-route.outputs.local == 'true'
+        id: local-review
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
+        with:
+          operation: verify-local
+          wait-for-verification: 'true'
+      - name: Review unstamped PR through the installed CI AI reviewer
+        if: steps.review-route.outputs.local != 'true'
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         id: assess
         with:
           operation: assess
@@ -224,7 +240,7 @@ jobs:
           name: clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: work
       - if: *approve-code
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: gate
           native-gate: 'true'
@@ -256,7 +272,7 @@ jobs:
         with:
           name: clouseau-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: work
-      - uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+      - uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: repair
           assessment: ${{ needs.assess-intent.outputs.assessment }}
@@ -276,7 +292,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+      - uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: finalize
           assessment: ${{ needs.assess-intent.outputs.assessment }}
@@ -296,7 +312,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+      - uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: request-reassessment
           pull-request: ${{ inputs.pull_request }}
@@ -307,12 +323,12 @@ jobs:
     timeout-minutes: 30
     permissions: {}
     steps:
-      - uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+      - uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: check-provider
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Qualify routed acceptance decisions
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: gaulatti/clouseau@9aadd5819bad9c59928411d6011c0018b2257dc0
         with:
           operation: evaluate-acceptance
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}

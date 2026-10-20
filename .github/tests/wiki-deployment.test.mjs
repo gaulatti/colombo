@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
-import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {parse} from 'yaml';
 import {allowed} from './workflow-expressions.mjs';
+import {root, pin} from './wiki-engine.mjs';
 
 const workflow = parse(readFileSync(new URL('../workflows/backend-deploy.yml', import.meta.url), 'utf8'));
 const ci = parse(readFileSync(new URL('../workflows/backend-ci.yml', import.meta.url), 'utf8'));
 const config = JSON.parse(readFileSync(new URL('../clouseau-wiki.json', import.meta.url), 'utf8'));
 const require = createRequire(import.meta.url);
-const shared = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
+const shared = `${root}/src`;
 const {planWiki, validateBundle, validateConfig, evaluateWiki} = require(`${shared}/wiki.cjs`);
 const {publishWiki} = require(`${shared}/wiki-git.cjs`);
 const facts = (pages, source) => ({pages: Object.fromEntries(pages.map(page => [page.path, {source_id: `${Object.keys(source)[0]}:L1`, findings: '', supported: true}]))});
@@ -65,7 +65,8 @@ test('deployment graph binds generation and atomic publication to the same exact
   assert.equal(upload.if, 'always()', 'keep factual diagnostics even when the draft is rejected');
   assert.equal(upload.with.path, 'work/wiki-plan.json*');
   assert.equal(download.with['run-id'], undefined, 'artifacts must come from this same workflow run');
-  const pin = ci.jobs.verify.steps.find(step => step.with?.repository === 'gaulatti/clouseau').with.ref;
+  assert.equal(ci.jobs.verify.steps.find(step => step.with?.repository === 'gaulatti/clouseau').with['fetch-depth'], 0,
+    'retain the independently pinned deployment engine for its real consumer tests');
   for (const step of [...plan, ...publish].filter(step => step.uses?.startsWith('gaulatti/clouseau@'))) {
     assert.equal(step.uses, `gaulatti/clouseau@${pin}`);
   }
