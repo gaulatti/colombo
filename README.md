@@ -138,6 +138,23 @@ Full architecture, configuration, CMS contracts, deployment, and tenant administ
 
 ## Pull requests
 
+Agents must run the current shared Clouseau skill locally before creating a PR,
+fix the reported findings, and review the final committed change again after
+repairs. Publish the passing signed receipt and include its marker in the initial
+ready PR body. `AGENTS.md` is authoritative; `CLAUDE.md` points Claude Code to the
+same requirement. Never push directly to `main`.
+
+Local review uses the authenticated coding harness and `.clouseau-local.json`,
+independently of CI provider keys. Install the documented Rust coverage tooling
+and start Docker first. `make coverage` runs the instrumented targets with a
+disposable PostgreSQL database and writes `coverage.json`; the shared runner
+checks exact native line and branch counters.
+
+CI authenticates signed local reviews without another AI request and still runs
+all tests, exact coverage and real container checks. An invalid, stale or altered
+stamp blocks approval without spending provider tokens. Unstamped manual and
+dependency-bot PRs use the separately installed CI AI reviewer.
+
 The Backend CI workflow uses the public [Clouseau](https://github.com/gaulatti/clouseau)
 action at an immutable reviewed revision. All tests and exact 100% application
 line and branch coverage are mandatory. Independent DeepSeek Flash and Pro

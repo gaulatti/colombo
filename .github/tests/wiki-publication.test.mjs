@@ -4,10 +4,10 @@ import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fileURLToPath} from 'node:url';
 import test from 'node:test';
+import {root as engine} from './wiki-engine.mjs';
 
-const root = fileURLToPath(new URL('../../.clouseau-ci/src/', import.meta.url));
+const root = `${engine}/src`;
 const {snapshot, publishWiki} = createRequire(import.meta.url)(`${root}/wiki-git.cjs`);
 const config = JSON.parse(readFileSync(new URL('../clouseau-wiki.json', import.meta.url)));
 const git = (directory, args) => execFileSync('git', ['-C', directory, ...args], {encoding: 'utf8', stdio: 'pipe'}).trim();

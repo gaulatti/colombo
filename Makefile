@@ -7,7 +7,7 @@ CARGO := cargo
 # Keep database-backed fixtures bounded on smaller development and CI machines.
 export RUST_TEST_THREADS ?= 4
 
-.PHONY: help dev dev-attach dev-stop tenants run build test test-db test-db-stop verify integration clean package docker-build docker-run
+.PHONY: help dev dev-attach dev-stop tenants run build test test-db test-db-stop verify coverage integration clean package docker-build docker-run
 
 help:
 	@echo "Colombo CLI"
@@ -23,6 +23,7 @@ help:
 	@echo "  make build        Compile project (skip tests)"
 	@echo "  make test         Run tests"
 	@echo "  make verify       Run format, tests, and Clippy"
+	@echo "  make coverage     Run all targets with native line/branch instrumentation"
 	@echo "  make integration  Exercise the Docker/FTP/HTTP boundary"
 	@echo "  make package      Build optimized native binary"
 	@echo "  make clean        Clean build outputs"
@@ -61,6 +62,12 @@ verify: test-db
 	  $(CARGO) fmt --all -- --check && \
 	  $(CARGO) test --locked && \
 	  $(CARGO) clippy --all-targets --all-features -- -D warnings
+
+coverage: test-db
+	@trap '$(MAKE) test-db-stop' EXIT; \
+	  $(CARGO) +nightly-2026-10-01 llvm-cov clean --workspace && \
+	  $(CARGO) +nightly-2026-10-01 llvm-cov --locked --all-targets --all-features --branch \
+	    --no-cfg-coverage --no-cfg-coverage-nightly --json --output-path coverage.json
 
 integration:
 	@./tests/e2e.sh

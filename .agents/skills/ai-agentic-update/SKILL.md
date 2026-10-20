@@ -20,6 +20,13 @@ If the current directory is below the repository root, resolve the repository
 root first and execute the script from there. After a successful update, reread
 the root `AGENTS.md` and any applicable updated skills before continuing.
 
+The updater also runs `scripts/ensure-clouseau` from this installed skill. It
+installs or refreshes the canonical public Clouseau agent skill in a shared
+user-wide cache. It adds no CI workflows, provider keys or branch settings.
+The public Clouseau refresh remains active when private bastille is unavailable;
+GitHub Actions skips local agent installation. The complete review mechanism
+is maintained in Clouseau and is never copied into consumer repositories.
+
 The helper fetches the central repository, hydrates the current repository from
 the fetched default-branch snapshot, creates a narrowly scoped Conventional
 Commit when managed files changed, and verifies the result. Wiki management
@@ -57,6 +64,11 @@ Malformed or incomplete installed metadata, conflicting ownership, unsafe centra
 content, and failed managed commits still stop work and must be reported. Do not
 invent a new snapshot or ignore these errors. Initial installation without a
 committed snapshot needs an authorized maintainer.
+
+The unavailable-access check rejects tracked edits and all untracked additions
+inside centrally owned skill directories, including ignored files. Remove or
+commit intended managed changes before relying on a checked-in snapshot. Files
+in differently named local skills and unrelated product work remain untouched.
 
 For a task worktree already stopped by the legacy dirty-metadata failure, do not
 blindly invoke the updater again. Preserve unrelated work and restart the ticket

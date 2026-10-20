@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "base_branch": "main",
+  "readme": "README.md",
+  "repository_policy": ".github/clouseau.md",
+  "verification": [
+    [
+      "cargo",
+      "+1.98.0",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    [
+      "cargo",
+      "+1.98.0",
+      "clippy",
+      "--locked",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    [
+      "make",
+      "coverage"
+    ],
+    [
+      "cargo",
+      "+1.98.0",
+      "test",
+      "--locked",
+      "--doc",
+      "--all-features"
+    ]
+  ],
+  "coverage": {
+    "format": "llvm",
+    "report": "coverage.json",
+    "source_directory": "src"
+  }
+}
