@@ -7,21 +7,21 @@ import test from 'node:test';
 import {parse} from 'yaml';
 
 const workflow = parse(readFileSync(new URL('../workflows/backend-ci.yml', import.meta.url), 'utf8'));
-const checkout = workflow.jobs.verify.steps.find(step => step.name === 'Check out pinned reviewer for consumer integration tests');
+const checkout = workflow.jobs.verify.steps.find(step => step.with?.repository === 'gaulatti/clouseau');
 const root = fileURLToPath(new URL('../../.clouseau-ci/', import.meta.url));
 const {requestReview} = createRequire(import.meta.url)(`${root}/src/provider.cjs`);
 const messages = [{role: 'system', content: 'Review the upload contract.'}, {role: 'user', content: 'A fictional upload bugfix.'}];
 const reply = (finish, content) => ({ok: true, json: async () => ({choices: [{finish_reason: finish, message: {content}}]})});
 
-test('consumer exercises the exact shared reviewer revision pinned by the workflow', () => {
-  const pins = Object.values(workflow.jobs).flatMap(job => job.steps ?? [])
-    .filter(step => step.uses?.startsWith('gaulatti/clouseau@')).map(step => step.uses.split('@')[1]);
-  assert.ok(pins.length > 0);
-  assert.ok(pins.every(pin => pin === checkout.with.ref));
-  assert.match(checkout.with.ref, /^[0-9a-f]{40}$/);
+test('consumer exercises the shared provider from its frozen run checkout', () => {
+  const uses = Object.values(workflow.jobs).flatMap(job => job.steps ?? [])
+    .filter(step => step.with?.operation).map(step => step.uses);
+  assert.ok(uses.length > 0);
+  assert.ok(uses.every(value => value === './.clouseau-ci'));
+  assert.equal(checkout.with.ref, '${{ needs.resolve-clouseau.outputs.sha }}');
   assert.equal(checkout.with.repository, 'gaulatti/clouseau');
   assert.equal(checkout.with['persist-credentials'], false);
-  assert.equal(execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), checkout.with.ref);
+  assert.equal(execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), process.env.CLOUSEAU_ENGINE_SHA);
 });
 
 test('real pinned provider automatically recovers a truncated completion with identical evidence', async () => {
