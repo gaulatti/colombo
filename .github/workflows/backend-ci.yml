@@ -51,7 +51,7 @@ jobs:
       digest: ${{ steps.engine.outputs.digest }}
     steps:
       - id: engine
-        uses: gaulatti/clouseau/scripts/resolve@02916e1d587e0555a9c0f93726a9a4af43c34b07
+        uses: gaulatti/clouseau/scripts/resolve@8b9950e1d38e17a482a0de3b2973f3fa87bc94c9
 
   verify:
     # Schedule the job so GitHub resolves its name, including metadata events.
