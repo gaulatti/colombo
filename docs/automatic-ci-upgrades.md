@@ -37,9 +37,12 @@ The small bootstrap needs a reviewed update only if its selection protocol
 changes. Review, hosted verification, receipt reuse or AI review, approval,
 merge and deployment are separate results.
 
-Automatic merge is reserved for authors who own every affected path according
-to CODEOWNERS on the protected base. Other contributions need code-owner
-involvement and manual merge; write permission alone is insufficient.
+When CODEOWNERS exists on the protected base, automatic merge is reserved for
+authors who own every affected path. Other contributions need code-owner
+involvement and manual merge; write permission alone is insufficient. Confirmed
+absence leaves the optional ownership gate inactive. Tests, review, exact coverage
+and branch protection remain mandatory; unreadable or invalid existing ownership
+evidence does not disable the gate.
 
 Documentation action pins inside `backend-deploy.yml` remain a separate
 production boundary. Updating that workflow would itself trigger deployment;
