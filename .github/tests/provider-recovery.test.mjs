@@ -18,7 +18,7 @@ test('consumer exercises the shared provider from its frozen run checkout', () =
     .filter(step => step.with?.operation).map(step => step.uses);
   assert.ok(uses.length > 0);
   assert.ok(uses.every(value => value === './.clouseau-ci'));
-  assert.equal(checkout.with.ref, '${{ needs.resolve-clouseau.outputs.sha }}');
+  assert.equal(checkout.with.ref, "${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}");
   assert.equal(checkout.with.repository, 'gaulatti/clouseau');
   assert.equal(checkout.with['persist-credentials'], false);
   assert.equal(execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), process.env.CLOUSEAU_ENGINE_SHA);

@@ -97,7 +97,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           fetch-depth: 0
           path: .clouseau-ci
           persist-credentials: false
@@ -235,7 +235,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - name: Select authenticated local review or the installed CI reviewer
@@ -308,7 +308,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - name: Load this run's acceptance record
@@ -358,7 +358,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -392,7 +392,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - uses: ./.clouseau-ci
@@ -423,7 +423,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - uses: ./.clouseau-ci
@@ -445,7 +445,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gaulatti/clouseau
-          ref: ${{ needs.resolve-clouseau.outputs.sha }}
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
           path: .clouseau-ci
           persist-credentials: false
       - uses: ./.clouseau-ci

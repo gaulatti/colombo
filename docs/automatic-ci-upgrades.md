@@ -10,6 +10,8 @@ Tests, receipt verification, AI review when needed, deterministic scores,
 approval and merge use that frozen checkout. Unavailable, malformed or
 unauthorized resolution blocks approval with no old-version fallback. Required
 native check names, forks, Dependabot and credential separation stay unchanged.
+Missing resolver output selects an invalid all-zero commit so checkout cannot
+silently use its default branch.
 Contributor execution receives no provider or write credentials.
 
 Protected `.github/clouseau.json` authorizes the exact central source instead of
