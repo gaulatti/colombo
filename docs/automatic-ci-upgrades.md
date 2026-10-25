@@ -33,6 +33,13 @@ evidence; they do not defend against a compromised workstation.
 The run summary and `clouseau-engine-RUN_ID-RUN_ATTEMPT` artifact identify the
 central SHA and engine digest. Acceptance records carry the same identity.
 Normal central releases reach new CI runs without consumer pin or digest PRs.
+The one-time migration from legacy digest enrollment uses the existing controlled
+installation path: publish a passing signed review in the initial ready PR,
+confirm its exact head with the owner's `/approve-intent` comment, and run the
+owner-guarded installation branch. Protected-base signer enrollment, independent
+PR checks and branch protection remain mandatory. This confirmation does not
+authorize arbitrary future engines; later runs select the protected central
+source configured by the accepted workflow.
 The small bootstrap needs a reviewed update only if its selection protocol
 changes. Review, hosted verification, receipt reuse or AI review, approval,
 merge and deployment are separate results.
