@@ -26,3 +26,12 @@ test('resolution failure cannot turn required PR approval into a skipped passing
     assert.equal(allowed(gate.steps.at(-1).if, context, {success: false}), false);
   }
 });
+
+test('verification never overwrites the resolved engine before workflow tests or exact coverage', () => {
+  const steps = workflow.jobs.verify.steps;
+  const checkouts = steps.filter(step => step.with?.repository === 'gaulatti/clouseau' || step.with?.path === '.clouseau-ci');
+  assert.equal(checkouts.length, 1);
+  assert.equal(checkouts[0].with.ref, "${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}");
+  assert.ok(steps.indexOf(checkouts[0]) < steps.findIndex(step => step.name === 'Test workflow routing'));
+  assert.ok(steps.indexOf(checkouts[0]) < steps.findIndex(step => step.name === 'Enforce 100% line and branch coverage'));
+});

@@ -124,15 +124,6 @@ jobs:
         uses: ./.clouseau-ci
         with:
           operation: test
-      - name: Check out pinned reviewer for consumer integration tests
-        uses: actions/checkout@v4
-        if: *verify-code
-        with:
-          repository: gaulatti/clouseau
-          ref: c88bb23a03c35f703f86ad1c419b80e390a07f03
-          fetch-depth: 0
-          path: .clouseau-ci
-          persist-credentials: false
       - name: Test workflow routing
         if: *verify-code
         run: |
