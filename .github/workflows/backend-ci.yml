@@ -119,6 +119,14 @@ jobs:
         if: *verify-code
         with:
           tool: cargo-llvm-cov@0.8.7
+      - name: Set up Python for frozen shared tests
+        if: *verify-code
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install frozen shared test dependencies
+        if: *verify-code
+        run: python3 -m pip install --disable-pip-version-check -r .clouseau-ci/requirements-test.txt
       - name: Test approval policy
         if: *verify-code
         uses: ./.clouseau-ci
