@@ -43,7 +43,7 @@ test('real consumer policy spends no model credit for pending, failed, stale or 
             .map(name => ({name, conclusion: 'success'}))}]}),
       },
     }, paginate: async (method, args) => (await method(args)).data};
-    const assessment = await createPolicy(config).assess({github, context,
+    const assessment = await createPolicy(config, {engine: require(`${root}/src/central-version.cjs`).environmentEngine()}).assess({github, context,
       fetchImpl: async () => assert.fail('a model must not be called before all verification succeeds')});
     assert.equal(assessment.decision, ['pending', 'stale'].includes(scenario) ? 'pending_technical' : 'blocked_technical');
     assert.equal(assessment.record_digest, undefined);

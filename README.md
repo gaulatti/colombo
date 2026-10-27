@@ -276,3 +276,6 @@ Planning and writing use DeepSeek Flash. The independent factual reviewer uses
 DeepSeek V4 Pro with the same configured provider key; no new secret is required.
 The live diagnostic exercises the actual factual reviewer on both correct and
 deliberately false documentation before validation-only draft generation.
+
+See [automatic Clouseau CI upgrades](docs/automatic-ci-upgrades.md) for the trusted
+central source, frozen engine identity, receipt compatibility and diagnostics.

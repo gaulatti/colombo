@@ -45,7 +45,6 @@
   },
   "local_review": {
     "mode": "optional",
-    "reviewer_digest": "efc1e48363f73edd317dc61a231ab2fa01b0808d8a53ff6c0f6a9c7c2a5c3691",
     "max_age_seconds": 3600,
     "keys": [
       {
@@ -55,6 +54,10 @@
         "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAp/os7kXSd5tLhgcyy61yPazqky0HfDNHdJL1oXNVfqU=\n-----END PUBLIC KEY-----\n",
         "revoked": false
       }
-    ]
+    ],
+    "central_source": {
+      "repository": "gaulatti/clouseau",
+      "ref": "refs/heads/main"
+    }
   }
 }
