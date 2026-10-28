@@ -51,6 +51,13 @@ absence leaves the optional ownership gate inactive. Tests, review, exact covera
 and branch protection remain mandatory; unreadable or invalid existing ownership
 evidence does not disable the gate.
 
-Documentation action pins inside `backend-deploy.yml` remain a separate
-production boundary. Updating that workflow would itself trigger deployment;
-this installation leaves its pins, commands and triggers unchanged.
+Source CI and the wiki jobs in `backend-deploy.yml` each resolve protected
+`gaulatti/clouseau` main once at their own start and freeze their own run
+identity: the SHA and computed digest are not shared between the two workflows.
+The wiki plan and publish jobs check out that exact SHA, verify it with the
+engine's `verify-engine` operation and record it in the plan artifact
+(`work/clouseau-engine.json`). A resolution failure fails the wiki run closed.
+Normal central releases reach both workflows without consumer update PRs.
+The resolution job is independent of `build-and-push` and `deploy`; deployment
+commands and triggers are unchanged. Because `backend-deploy.yml` is a deploy
+trigger path, merging this workflow change itself starts a deployment run.
