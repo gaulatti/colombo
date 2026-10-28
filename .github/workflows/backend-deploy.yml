@@ -178,8 +178,20 @@ jobs:
             '
 
 
+  resolve-clouseau:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.engine.outputs.sha }}
+      digest: ${{ steps.engine.outputs.digest }}
+    steps:
+      - id: engine
+        uses: gaulatti/clouseau/scripts/resolve@fd655851419980f833ff13a94b0d6ff41a901cb2
+
   wiki-plan:
-    needs: deploy
+    needs: [deploy, resolve-clouseau]
     if: >-
       always() && ((github.ref == 'refs/heads/main' && !inputs.validate_wiki_only && needs.deploy.result == 'success') ||
       (github.event_name == 'workflow_dispatch' && inputs.validate_wiki_only))
@@ -188,6 +200,9 @@ jobs:
     permissions:
       contents: read
       actions: read
+    env:
+      CLOUSEAU_ENGINE_SHA: ${{ needs.resolve-clouseau.outputs.sha }}
+      CLOUSEAU_ENGINE_DIGEST: ${{ needs.resolve-clouseau.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -199,14 +214,24 @@ jobs:
           ref: master
           path: wiki
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: gaulatti/clouseau
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
+          path: .clouseau-ci
+          persist-credentials: false
+      - name: Verify and record the frozen documentation engine
+        uses: ./.clouseau-ci
+        with:
+          operation: verify-engine
       - name: Verify the live wiki factual gate
         if: inputs.validate_wiki_only
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: ./.clouseau-ci
         with:
           operation: evaluate-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
       - name: Generate and validate the complete wiki update
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: ./.clouseau-ci
         with:
           operation: plan-wiki
           provider-key: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -215,12 +240,14 @@ jobs:
         if: always()
         with:
           name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
-          path: work/wiki-plan.json*
+          path: |
+            work/wiki-plan.json*
+            work/clouseau-engine.json
           if-no-files-found: error
           retention-days: 7
 
   wiki-publish:
-    needs: [deploy, wiki-plan]
+    needs: [deploy, wiki-plan, resolve-clouseau]
     if: >-
       always() && github.ref == 'refs/heads/main' && !inputs.validate_wiki_only &&
       needs.deploy.result == 'success' && needs.wiki-plan.result == 'success'
@@ -229,6 +256,9 @@ jobs:
     permissions:
       contents: write
       actions: read
+    env:
+      CLOUSEAU_ENGINE_SHA: ${{ needs.resolve-clouseau.outputs.sha }}
+      CLOUSEAU_ENGINE_DIGEST: ${{ needs.resolve-clouseau.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -240,12 +270,22 @@ jobs:
           ref: master
           path: wiki
           persist-credentials: true
+      - uses: actions/checkout@v4
+        with:
+          repository: gaulatti/clouseau
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
+          path: .clouseau-ci
+          persist-credentials: false
+      - name: Verify and record the frozen documentation engine
+        uses: ./.clouseau-ci
+        with:
+          operation: verify-engine
       - uses: actions/download-artifact@v4
         with:
           name: wiki-plan-${{ github.run_id }}-${{ github.sha }}
           path: wiki-plan
       - name: Publish all wiki pages atomically
-        uses: gaulatti/clouseau@b60ac157aaf4989e984e9f0694374212babb2c60
+        uses: ./.clouseau-ci
         with:
           operation: publish-wiki
           wiki-plan-path: wiki-plan/wiki-plan.json

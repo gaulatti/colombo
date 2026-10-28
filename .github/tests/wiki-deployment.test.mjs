@@ -47,8 +47,10 @@ test('deployment graph binds generation and atomic publication to the same exact
   assert.equal(config.deployment_job, 'deploy');
   assert.equal(config.wiki_branch, 'master');
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
-  assert.equal(workflow.jobs['wiki-plan'].needs, 'deploy');
-  assert.deepEqual(workflow.jobs['wiki-publish'].needs, ['deploy', 'wiki-plan']);
+  assert.deepEqual(workflow.jobs['wiki-plan'].needs, ['deploy', 'resolve-clouseau']);
+  assert.deepEqual(workflow.jobs['wiki-publish'].needs, ['deploy', 'wiki-plan', 'resolve-clouseau']);
+  // Deployment must never wait for, or depend on, engine resolution.
+  for (const name of ['build-and-push', 'deploy']) assert.ok(!JSON.stringify(workflow.jobs[name].needs ?? []).includes('resolve-clouseau'));
   const plan = workflow.jobs['wiki-plan'].steps;
   const publish = workflow.jobs['wiki-publish'].steps;
   for (const steps of [plan, publish]) {
@@ -63,13 +65,33 @@ test('deployment graph binds generation and atomic publication to the same exact
   assert.equal(download.with.name, upload.with.name);
   assert.equal(upload.with['if-no-files-found'], 'error');
   assert.equal(upload.if, 'always()', 'keep factual diagnostics even when the draft is rejected');
-  assert.equal(upload.with.path, 'work/wiki-plan.json*');
+  assert.equal(upload.with.path, 'work/wiki-plan.json*\nwork/clouseau-engine.json\n');
   assert.equal(download.with['run-id'], undefined, 'artifacts must come from this same workflow run');
   assert.equal(ci.jobs.verify.steps.find(step => step.with?.repository === 'gaulatti/clouseau').with['fetch-depth'], 0,
     'retain the independently pinned deployment engine for its real consumer tests');
-  for (const step of [...plan, ...publish].filter(step => step.uses?.startsWith('gaulatti/clouseau@'))) {
-    assert.equal(step.uses, `gaulatti/clouseau@${pin}`);
+  const resolver = workflow.jobs['resolve-clouseau'];
+  assert.deepEqual(resolver.permissions, {contents: 'read'});
+  assert.equal(resolver.steps.length, 1);
+  assert.equal(resolver.steps[0].uses, ci.jobs['resolve-clouseau'].steps[0].uses, 'wiki resolves the same central bootstrap as source CI');
+  assert.deepEqual(resolver.outputs, ci.jobs['resolve-clouseau'].outputs);
+  for (const [name, steps] of [['wiki-plan', plan], ['wiki-publish', publish]]) {
+    const job = workflow.jobs[name];
+    assert.equal(job.env.CLOUSEAU_ENGINE_SHA, '${{ needs.resolve-clouseau.outputs.sha }}');
+    assert.equal(job.env.CLOUSEAU_ENGINE_DIGEST, '${{ needs.resolve-clouseau.outputs.digest }}');
+    const engine = steps.findIndex(step => step.with?.repository === 'gaulatti/clouseau');
+    assert.equal(steps[engine].with.ref, "${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}");
+    assert.equal(steps[engine].with.path, '.clouseau-ci');
+    assert.equal(steps[engine].with['persist-credentials'], false);
+    assert.equal(steps[engine + 1].uses, './.clouseau-ci');
+    assert.equal(steps[engine + 1].with.operation, 'verify-engine');
+    const shared = steps.filter(step => step.with?.operation && step.with.operation !== 'verify-engine');
+    assert.ok(shared.length > 0);
+    for (const step of shared) {
+      assert.equal(step.uses, './.clouseau-ci');
+      assert.ok(steps.indexOf(step) > engine + 1, 'run the engine only after it is checked out and verified');
+    }
   }
+  assert.ok(!JSON.stringify(workflow).includes('gaulatti/clouseau@'), 'no wiki job uses a fixed engine pin');
 });
 
 test('provider and publication authority are isolated and preflight cannot write', () => {

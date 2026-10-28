@@ -208,6 +208,10 @@ audit against production source, with the other proposed pages available for
 consistency;
 it must support every updated page with a reference to an exact source line and no findings.
 Unsupported claims, invented source references, or missing page evidence stop publication.
+The wiki workflow freezes its own run identity: an isolated `resolve-clouseau`
+job resolves protected Clouseau `main` once, and generation and publication check
+out that exact SHA, verify it, and record it in the plan artifact. It follows
+central releases without update PRs and is independent of the deployment jobs.
 The source allowlist is `.github/clouseau-wiki.json`; agent instructions and real
 environment files are not documentation sources.
 
