@@ -15,5 +15,6 @@ const repository = fileURLToPath(new URL('../../.clouseau-ci/', import.meta.url)
 // The wiki jobs execute the engine this run froze; test exactly that revision.
 export const pin = execFileSync('git', ['-C', repository, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
 if (pin !== process.env.CLOUSEAU_ENGINE_SHA) throw new Error('Wiki tests require .clouseau-ci at CLOUSEAU_ENGINE_SHA');
-const archive = execFileSync('git', ['-C', repository, 'archive', pin, 'src', 'policy', 'action.yml']);
+// The engine archive exceeds Node's 1 MiB default capture limit; state a bound that leaves room to grow.
+const archive = execFileSync('git', ['-C', repository, 'archive', pin, 'src', 'policy', 'action.yml'], {maxBuffer: 256 * 1024 * 1024});
 execFileSync('tar', ['-x', '-C', root], {input: archive});
