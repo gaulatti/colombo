@@ -202,8 +202,12 @@ test('factual gate blocks the live-preflight error: temporary CMS failure is not
 });
 
 
+// These tests stub the provider transport, which still requires a key to be present.
+const restoreKey = original => { if (original === undefined) delete process.env.DEEPSEEK_API_KEY; else process.env.DEEPSEEK_API_KEY = original; };
+
 test('live wiki diagnostic uses the production Pro reasoning transport while retaining substantive negative review', async () => {
-  const original = globalThis.fetch;
+  const original = globalThis.fetch, originalKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'fictional-test-key';
   const requests = [];
   globalThis.fetch = async (_, options) => {
     const body = JSON.parse(options.body); requests.push(body);
@@ -214,7 +218,7 @@ test('live wiki diagnostic uses the production Pro reasoning transport while ret
     return {ok: true, json: async () => ({choices: [{finish_reason: 'tool_calls', message: {tool_calls: [{type: 'function', function: {name: 'wiki_result', arguments: JSON.stringify(verdict)}}]}}]})};
   };
   try {await evaluateWiki();}
-  finally {globalThis.fetch = original;}
+  finally {globalThis.fetch = original; restoreKey(originalKey);}
   assert.equal(requests.length, 4);
   for (const body of requests) {
     assert.deepEqual(body.thinking, {type: 'enabled'});
@@ -283,7 +287,8 @@ test('wiki citations resolve immutable source lines and refuse blanks, invented 
 });
 
 test('production wiki transport enforces separate native schemas for plan, requested page and factual review', async () => {
-  const original = globalThis.fetch, requests = [];
+  const original = globalThis.fetch, originalKey = process.env.DEEPSEEK_API_KEY, requests = [];
+  process.env.DEEPSEEK_API_KEY = 'fictional-test-key';
   globalThis.fetch = async (url, options) => {
     assert.equal(url, 'https://api.deepseek.com/beta/chat/completions');
     const body = JSON.parse(options.body); requests.push(body);
@@ -297,7 +302,7 @@ test('production wiki transport enforces separate native schemas for plan, reque
   try {
     const bundle = await planWiki({identity, source: {'README.md': 'The spool is persistent.'}, wiki: {'Home.md': '# Home'}});
     assert.match(bundle.updates[0].content, /spool is persistent/);
-  } finally {globalThis.fetch = original;}
+  } finally {globalThis.fetch = original; restoreKey(originalKey);}
   assert.deepEqual(requests.map(body => body.model), ['deepseek-flash', 'deepseek-flash', 'deepseek-v4-pro']);
   assert.deepEqual(requests.map(body => body.tools[0].function.parameters.required), [['pages'], ['path', 'content'], ['pages']]);
   assert.ok(requests.every(body => body.tools[0].function.strict === true && body.tools[0].function.parameters.additionalProperties === false));
