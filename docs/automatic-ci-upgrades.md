@@ -1,7 +1,7 @@
 # Automatic Clouseau CI upgrades
 
 Source CI defines “latest” as the commit on protected `gaulatti/clouseau` main
-when the isolated `resolve-clouseau` job runs. The pinned public bootstrap has no
+when the isolated `resolve-clouseau` job runs. The public bootstrap (referenced at `@main`) has no
 repository or branch inputs. It validates protection and the full SHA, checks
 out that immutable revision and computes its engine digest. Each engine job
 uses those same outputs; a central advance affects the next run only.
