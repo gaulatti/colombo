@@ -44,12 +44,14 @@ The small bootstrap needs a reviewed update only if its selection protocol
 changes. Review, hosted verification, receipt reuse or AI review, approval,
 merge and deployment are separate results.
 
-When CODEOWNERS exists on the protected base, automatic merge is reserved for
-authors who own every affected path. Other contributions need code-owner
-involvement and manual merge; write permission alone is insufficient. Confirmed
-absence leaves the optional ownership gate inactive. Tests, review, exact coverage
-and branch protection remain mandatory; unreadable or invalid existing ownership
-evidence does not disable the gate.
+Colombo explicitly selects `"merge_mode": "automatic"` and keeps
+`.github/CODEOWNERS` (`* @gaulatti`) on the protected base. Automatic merge is
+reserved for authors who own every affected path, read from the protected base.
+Other approved authors need current-head code-owner approval and a manual merge;
+write permission alone is insufficient. With this explicit mode, missing, invalid
+or unreadable ownership never arms automatic merge. CODEOWNERS and
+`merge_mode` are protected review controls. Tests, review, exact coverage and
+branch protection remain mandatory.
 
 Source CI and the wiki jobs in `backend-deploy.yml` each resolve protected
 `gaulatti/clouseau` main once at their own start and freeze their own run
