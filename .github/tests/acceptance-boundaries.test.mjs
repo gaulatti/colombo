@@ -23,6 +23,12 @@ test('the consumer selects the scored protocol with explicit independent roles a
   assert.match(contract, /explicit owner confirmation/);
 });
 
+test('the consumer selects strict owner-only automatic merge with explicit code ownership', () => {
+  assert.equal(config.merge_mode, 'automatic');
+  const owners = readFileSync(new URL('../CODEOWNERS', import.meta.url), 'utf8');
+  assert.equal(owners, '* @gaulatti\n');
+});
+
 test('real consumer policy spends no model credit for pending, failed, stale or incomplete verification', async () => {
   for (const scenario of ['pending', 'failed', 'stale', 'missing step']) {
     const pr = {number: 3, state: 'open', draft: false, head: {sha: head, ref: 'fix/upload', repo: {id: 1}},
