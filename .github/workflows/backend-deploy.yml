@@ -33,6 +33,8 @@ concurrency:
 jobs:
   build-and-push:
     if: github.ref == 'refs/heads/main' && !inputs.validate_wiki_only
+    outputs:
+      image_digest: ${{ steps.push-image.outputs.digest }}
     env:
       RUST_TEST_THREADS: 4
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -65,6 +67,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
+      - name: Verify immutable deployment shell
+        run: python3 tests/deployment_digest.py
       - name: Verify Rust service
         run: |
           cargo fmt --all -- --check
@@ -90,9 +94,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.DEPLOYMENT_TOKEN }}
       - name: Push verified image
+        id: push-image
         run: |
+          docker tag colombo:ci ghcr.io/${{ github.repository }}:${{ github.sha }}
           docker tag colombo:ci ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
           docker push ghcr.io/${{ github.repository }}:latest
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ github.repository }}:${{ github.sha }} | cut -d'@' -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Backend image'
+            echo '```text'
+            echo "revision=${GITHUB_SHA}"
+            echo "digest=${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: github.ref == 'refs/heads/main' && !inputs.validate_wiki_only
@@ -104,6 +120,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           BUILD_VERSION: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_digest }}
           COLOMBO_METRICS_TOKEN: ${{ secrets.COLOMBO_METRICS_TOKEN }}
           DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -122,7 +139,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: BUILD_VERSION,COLOMBO_METRICS_TOKEN,DATABASE_PASSWORD,DATABASE_URL,DATABASE_USER,DEPLOY_HOST_ADDRESS,DEPLOYMENT_TOKEN,FLYWAY_ENABLED,FTP_PASSIVE_EXTERNAL_ADDRESS,FTP_PASSIVE_PORTS,FTP_PORT,FTPS_CERT,FTPS_KEY,HTTP_PORT,REGISTRY_USER
+          envs: BUILD_VERSION,IMAGE_DIGEST,COLOMBO_METRICS_TOKEN,DATABASE_PASSWORD,DATABASE_URL,DATABASE_USER,DEPLOY_HOST_ADDRESS,DEPLOYMENT_TOKEN,FLYWAY_ENABLED,FTP_PASSIVE_EXTERNAL_ADDRESS,FTP_PASSIVE_PORTS,FTP_PORT,FTPS_CERT,FTPS_KEY,HTTP_PORT,REGISTRY_USER
           script: |
             /bin/bash -lc '
               set -euo pipefail
@@ -153,7 +170,20 @@ jobs:
               fi
 
               printf "%s" "$DEPLOYMENT_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
-              docker pull ghcr.io/${{ github.repository }}:latest
+              if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+                echo "ERROR: a verified immutable image digest is required"
+                exit 1
+              fi
+              TARGET_IMAGE="ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
+              echo "Pulling immutable image: $TARGET_IMAGE"
+              docker pull "$TARGET_IMAGE"
+              EXPECTED_IMAGE_ID=$(docker image inspect --format="{{.Id}}" "$TARGET_IMAGE")
+              if [ -z "$EXPECTED_IMAGE_ID" ]; then
+                echo "ERROR: pulled image identity is missing"
+                exit 1
+              fi
+              PREVIOUS_IMAGE_ID=$(docker inspect --format="{{.Image}}" colombo-backend 2>/dev/null || true)
+              echo "rollback_image_id=$PREVIOUS_IMAGE_ID"
               docker stop colombo-backend || true
               docker rm colombo-backend || true
               docker run -d --name colombo-backend \
@@ -174,7 +204,14 @@ jobs:
                 -v colombo-spool:/var/lib/colombo/spool \
                 "${FTPS_ARGS[@]}" \
                 --restart=always \
-                ghcr.io/${{ github.repository }}:latest
+                "$TARGET_IMAGE"
+              RUNNING_IMAGE_ID=$(docker inspect --format="{{.Image}}" colombo-backend)
+              if [ "$RUNNING_IMAGE_ID" != "$EXPECTED_IMAGE_ID" ]; then
+                docker stop colombo-backend
+                echo "ERROR: running container image does not match the verified digest"
+                exit 1
+              fi
+              echo "revision=$BUILD_VERSION digest=$IMAGE_DIGEST running_image_id=$RUNNING_IMAGE_ID"
             '
 
 
