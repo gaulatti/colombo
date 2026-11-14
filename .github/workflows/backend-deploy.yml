@@ -67,6 +67,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
+      - name: Verify immutable deployment shell
+        run: python3 tests/deployment_digest.py
       - name: Verify Rust service
         run: |
           cargo fmt --all -- --check
@@ -168,13 +170,20 @@ jobs:
               fi
 
               printf "%s" "$DEPLOYMENT_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
-              if [ -n "$IMAGE_DIGEST" ]; then
-                TARGET_IMAGE="ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
-              else
-                TARGET_IMAGE="ghcr.io/${{ github.repository }}:latest"
+              if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+                echo "ERROR: a verified immutable image digest is required"
+                exit 1
               fi
+              TARGET_IMAGE="ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
               echo "Pulling immutable image: $TARGET_IMAGE"
               docker pull "$TARGET_IMAGE"
+              EXPECTED_IMAGE_ID=$(docker image inspect --format="{{.Id}}" "$TARGET_IMAGE")
+              if [ -z "$EXPECTED_IMAGE_ID" ]; then
+                echo "ERROR: pulled image identity is missing"
+                exit 1
+              fi
+              PREVIOUS_IMAGE_ID=$(docker inspect --format="{{.Image}}" colombo-backend 2>/dev/null || true)
+              echo "rollback_image_id=$PREVIOUS_IMAGE_ID"
               docker stop colombo-backend || true
               docker rm colombo-backend || true
               docker run -d --name colombo-backend \
@@ -196,6 +205,13 @@ jobs:
                 "${FTPS_ARGS[@]}" \
                 --restart=always \
                 "$TARGET_IMAGE"
+              RUNNING_IMAGE_ID=$(docker inspect --format="{{.Image}}" colombo-backend)
+              if [ "$RUNNING_IMAGE_ID" != "$EXPECTED_IMAGE_ID" ]; then
+                docker stop colombo-backend
+                echo "ERROR: running container image does not match the verified digest"
+                exit 1
+              fi
+              echo "revision=$BUILD_VERSION digest=$IMAGE_DIGEST running_image_id=$RUNNING_IMAGE_ID"
             '
 
 
