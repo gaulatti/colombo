@@ -190,6 +190,21 @@ weaken or contradict these rules.
 - Do not call a full-stack change complete until the application has been built
   and exercised through the Compose-served browser UI and normal backend path.
 
+## Local container runtime
+
+- On macOS, run Docker in the shared `default` Colima profile. Never create
+  additional Colima profiles or VMs per task, branch, ticket, or verification
+  run; each one keeps a full disk image that is not reclaimed when the task
+  ends.
+- Isolate parallel work inside the shared runtime with distinct Compose project
+  names (`docker compose -p <task>`), not separate VMs. Do not change the
+  default profile's CPU, memory, or disk settings without explicit approval.
+- Before handing off, stop and remove the containers, networks, and volumes the
+  task created (`docker compose -p <task> down -v` for disposable state). Keep
+  volumes only when the user needs that state afterward, and say so.
+- If a task genuinely needs a separate Colima profile, ask first. When approved,
+  delete it with `colima delete --force --data -p <profile>` before finishing.
+
 ## Prometheus observability for managed backends
 
 - Before changing backend behavior, inspect the repository's existing metrics,
